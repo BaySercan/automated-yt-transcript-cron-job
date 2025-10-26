@@ -1,4 +1,4 @@
-# Finfluencer Tracker Cron Job v4
+# Automated YouTube Transcript Cron Job
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
@@ -8,7 +8,7 @@ The cron job automatically:
 
 1. Fetches active YouTube channel IDs from a Supabase table
 2. Retrieves new videos since each channel's last check date
-3. Downloads video transcripts
+3. Downloads video transcripts using RapidAPI
 4. Analyzes transcripts using AI models hosted on OpenRouter
 5. Parses structured JSON output and saves to Supabase
 6. Updates channel processing timestamps
@@ -19,9 +19,9 @@ The cron job automatically:
 - **Language**: TypeScript (Node.js 20+)
 - **Scheduler**: Northflank Cron Job (daily at 23:30)
 - **Database**: Supabase (PostgreSQL)
-- **AI Provider**: OpenRouter API
-- **YouTube API**: YouTube Data API v3
-- **Transcript**: `youtube-transcript` package
+- **AI Provider**: OpenRouter API (for transcript analysis)
+- **YouTube API**: YouTube Data API v3 + RapidAPI (for transcript retrieval)
+- **Transcript Provider**: RapidAPI (youtube-multi-api service)
 - **Deployment**: Docker
 - **Configuration**: Environment variables
 
@@ -30,7 +30,8 @@ The cron job automatically:
 ```
 /src
  ├─ index.ts             # Entry point: main cron logic
- ├─ youtube.ts           # YouTube fetch and transcript utilities
+ ├─ youtube.ts           # YouTube fetch utilities
+ ├─ rapidapi.ts          # RapidAPI transcript service
  ├─ analyzer.ts          # Sends transcript to OpenRouter, parses response
  ├─ supabase.ts          # Handles database read/write
  ├─ types.ts             # Shared TypeScript interfaces
@@ -58,7 +59,12 @@ SUPABASE_SERVICE_KEY=your_supabase_service_role_key_here
 
 # OpenRouter AI Configuration
 OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_MODEL=openai/gpt-4o-mini
+OPENROUTER_MODEL=your_preferred_model
+
+# RapidAPI Configuration (YouTube Transcript Service)
+RAPIDAPI_HOST=youtube-multi-api.p.rapidapi.com
+RAPIDAPI_KEY=your_rapidapi_key_here
+RAPIDAPI_URL=https://youtube-multi-api.p.rapidapi.com
 
 # Application Configuration
 START_DATE=2025-01-01
@@ -181,7 +187,7 @@ Check Northflank logs for:
 
 ## 🧠 AI Analysis
 
-The service uses a detailed prompt to extract financial predictions from video transcripts. The AI analyzes:
+The service uses OpenRouter API to analyze video transcripts for financial predictions. The AI analyzes:
 
 - **Asset predictions** (BTC, GOLD, AAPL, BIST, NASDAQ, S&P500, etc.)
 - **Future-oriented statements** (price forecasts, market direction)
@@ -189,6 +195,16 @@ The service uses a detailed prompt to extract financial predictions from video t
 - **Sentiment analysis** (bullish, bearish, neutral)
 - **Target prices** with automatic error correction
 - **Confidence levels** (low, medium, high)
+
+### OpenRouter Models
+
+The service supports various AI models through OpenRouter. You can configure the model by setting the `OPENROUTER_MODEL` environment variable:
+
+- **DeepSeek Chat V3.1** (default, cost-effective)
+- **OpenAI GPT-4o Mini**
+- **Anthropic Claude-3.5-Sonnet**
+- **Mistral Medium**
+- **Google Gemini Pro**
 
 ### Example AI Output
 
@@ -219,6 +235,25 @@ The service uses a detailed prompt to extract financial predictions from video t
 }
 ```
 
+## 🔄 Workflow
+
+1. **Startup**: Validate configuration and test connections
+2. **Channel Fetch**: Get all active channels from Supabase
+3. **Video Discovery**: For each channel, find new videos since last check
+4. **Transcript Processing**: Download transcripts using RapidAPI
+5. **AI Analysis**: Send transcripts to OpenRouter for analysis
+6. **Data Storage**: Save structured results to Supabase
+7. **Cleanup**: Update timestamps and log statistics
+
+## 🛡️ Error Handling
+
+- **Retry Logic**: Automatic retries with exponential backoff
+- **Graceful Degradation**: Creates basic records even if analysis fails
+- **Rate Limiting**: Respects API quotas for YouTube, RapidAPI, and OpenRouter
+- **Graceful Shutdown**: Handles SIGTERM/SIGINT signals properly
+- **Validation**: Comprehensive input validation and sanitization
+- **Timeout Protection**: Configurable timeouts for API calls
+
 ## 📊 Monitoring & Logging
 
 The service provides comprehensive logging:
@@ -238,31 +273,14 @@ The service provides comprehensive logging:
 - `error`: Fatal errors
 - `debug`: Detailed debugging info
 
-## 🔄 Workflow
-
-1. **Startup**: Validate configuration and test connections
-2. **Channel Fetch**: Get all active channels from Supabase
-3. **Video Discovery**: For each channel, find new videos since last check
-4. **Transcript Processing**: Download transcripts for new videos
-5. **AI Analysis**: Send transcripts to OpenRouter for analysis
-6. **Data Storage**: Save structured results to Supabase
-7. **Cleanup**: Update timestamps and log statistics
-
-## 🛡️ Error Handling
-
-- **Retry Logic**: Automatic retries with exponential backoff
-- **Graceful Degradation**: Creates basic records even if analysis fails
-- **Rate Limiting**: Respects API quotas for YouTube and OpenRouter
-- **Graceful Shutdown**: Handles SIGTERM/SIGINT signals properly
-- **Validation**: Comprehensive input validation and sanitization
-
 ## 🔧 Configuration Options
 
 ### OpenRouter Models
 
 Easily switch AI models by changing `OPENROUTER_MODEL`:
 
-- `openai/gpt-4o-mini` (default)
+- `deepseek/deepseek-chat-v3.1:free` (default)
+- `openai/gpt-4o-mini`
 - `anthropic/claude-3.5-sonnet`
 - `mistralai/mistral-medium`
 - `google/gemini-pro`
@@ -271,7 +289,8 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
 
 - `YOUTUBE_MAX_RESULTS`: Videos per API call (default: 50)
 - `MAX_RETRIES`: Retry attempts (default: 3)
-- `REQUEST_TIMEOUT`: API timeout in ms (default: 30000)
+- `REQUEST_TIMEOUT`: API timeout in ms (default: 90000)
+- `RAPIDAPI_MAX_POLL_TIME`: Maximum time to wait for transcript (default: 300000ms)
 
 ## 📈 Performance
 
@@ -279,6 +298,7 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
 - **Rate Limited**: Respects API quotas to avoid bans
 - **Batch Processing**: Efficient database operations
 - **Container Optimized**: Small Alpine Linux base image
+- **Adaptive Polling**: RapidAPI polling adapts to processing time
 
 ## 🐛 Troubleshooting
 
@@ -288,16 +308,21 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
    - Check API quota in Google Cloud Console
    - Reduce `YOUTUBE_MAX_RESULTS` if needed
 
-2. **Supabase Connection Failed**
+2. **RapidAPI Timeout**
+   - Some videos take longer to process
+   - Increase `RAPIDAPI_MAX_POLL_TIME` if needed
+   - Check video has available transcripts
+
+3. **Supabase Connection Failed**
    - Verify `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`
    - Check database table existence
 
-3. **OpenRouter API Errors**
+4. **OpenRouter API Errors**
    - Verify `OPENROUTER_API_KEY`
    - Check model availability
    - Monitor rate limits
 
-4. **Transcript Not Available**
+5. **Transcript Not Available**
    - Some videos don't have transcripts
    - Service logs warnings but continues processing
 
