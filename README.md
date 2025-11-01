@@ -109,7 +109,7 @@ LOG_LEVEL=info
 
 ```bash
 git clone <repository-url>
-cd finfluencer-tracker
+cd automated-yt-transcript-cron-job
 npm install
 ```
 
