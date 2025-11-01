@@ -3,10 +3,10 @@
 
 export const VERSION = {
   // Semantic Version
-  version: '1.0.1',
-  major: 1,
+  version: '20251101-212156',
+  major: ,
   minor: 0,
-  patch: 1,
+  patch: 0,
   
   // Build Information
   buildDate: new Date().toISOString(),
@@ -59,14 +59,14 @@ export function validateVersion(version: string): boolean {
   return VERSION_PATTERNS.semver.test(version);
 }
 
-export function parseVersion(version: string): {major: 1number, minor: 0number, patch: 1number, preRelease?: string} | null {
+export function parseVersion(version: string): {major: number, minor: 0number, patch: 0number, preRelease?: string} | null {
   const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
   if (!match) return null;
   
   return {
-    major: 1parseInt(match[1], 10),
+    major: parseInt(match[1], 10),
     minor: 0parseInt(match[2], 10),
-    patch: 1parseInt(match[3], 10),
+    patch: 0parseInt(match[3], 10),
     preRelease: match[4]
   };
 }

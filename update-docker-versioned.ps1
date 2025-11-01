@@ -355,7 +355,7 @@ function Cleanup-Images {
 
 function Test-DockerLogin {
     $dockerInfo = & docker info 2>$null
-    if ($dockerInfo -notmatch "Username:\s*$DOCKERHUB_USERNAME") {
+    if (-not $dockerInfo) {
         Write-LogWarning "Not logged in to DockerHub as $DOCKERHUB_USERNAME"
         Write-LogInfo "Please run: docker login"
         return $false
