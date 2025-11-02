@@ -1,4 +1,4 @@
-# Enhanced Finfluencer Tracker Docker Update Script with Version Management (PowerShell)
+# Enhanced Finfluencer Tracker Docker Update Script with Version Management (PowerShell) - FINAL FIXED VERSION
 # Usage: .\update-docker-versioned.ps1 [version] [options]
 # Examples:
 #   .\update-docker-versioned.ps1                 # Auto-generates version
@@ -23,6 +23,9 @@ param(
     
     [Parameter(HelpMessage="Skip Git tagging and commits")]
     [switch]$NoGit,
+    
+    [Parameter(HelpMessage="Skip publishing to DockerHub")]
+    [switch]$SkipPublish,
     
     [Parameter(HelpMessage="Number of versions to keep (default: 5)")]
     [int]$KeepVersions = 5,
@@ -68,7 +71,7 @@ function Write-LogError {
 }
 
 function Show-Help {
-    Write-Host "Enhanced Finfluencer Tracker Docker Update Script with Version Management (PowerShell)" -ForegroundColor $GREEN
+    Write-Host "Enhanced Finfluencer Tracker Docker Update Script with Version Management (PowerShell) - FINAL FIXED VERSION" -ForegroundColor $GREEN
     Write-Host ""
     Write-Host "Usage: $PSCommandPath [version] [options]"
     Write-Host ""
@@ -82,6 +85,7 @@ function Show-Help {
     Write-Host "  -CleanupOnly            Only clean up old Docker images"
     Write-Host "  -SyncVersions           Sync versions across all project files"
     Write-Host "  -NoGit                  Skip Git tagging and commits"
+    Write-Host "  -SkipPublish            Skip publishing to DockerHub"
     Write-Host "  -KeepVersions <N>       Keep last N versions (default: 5)"
     Write-Host "  -Help, -?               Show this help message"
     Write-Host ""
@@ -93,6 +97,7 @@ function Show-Help {
     Write-Host "  $PSCommandPath -CleanupOnly              # Clean up old images only"
     Write-Host "  $PSCommandPath -Version v1.2.0 -SkipTest # Skip local testing"
     Write-Host "  $PSCommandPath -KeepVersions 3           # Keep only last 3 versions"
+    Write-Host "  $PSCommandPath -SkipPublish              # Skip DockerHub publish"
     Write-Host ""
     Write-Host "Environment:"
     Write-Host "  Uses .env file for environment variables"
@@ -174,7 +179,15 @@ function Update-IndexTs {
     if (Test-Path $INDEX_FILE) {
         Write-LogInfo "Updating src/index.ts version to $NewVersion"
         $content = Get-Content $INDEX_FILE -Raw
-        $updatedContent = $content -replace '"version":\s*"[^"]*"', "`"version`": `"$NewVersion`""
+        
+        # Target the specific logger.info line with exact context
+        # logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
+        #   version: '1.1.5',
+        #   environment: config.timezone,
+        #   model: config.openrouterModel
+        # });
+        $updatedContent = $content -replace "(?<=logger\.info\([^)]*version:\s*)'[^']*'", "'$NewVersion'"
+        
         Set-Content -Path $INDEX_FILE -Value $updatedContent -NoNewline
         Write-LogSuccess "Updated src/index.ts"
     } else {
@@ -199,13 +212,30 @@ function Update-VersionTs {
         
         $content = Get-Content $VERSION_FILE -Raw
         
-        # Update version.ts using correct regex patterns for the object structure
-        $content = $content -replace "version:\s*'[^']*'", "version: '$NewVersion'"
-        $content = $content -replace "major:\s*[0-9]*", "major: $major"
-        $content = $content -replace "minor:\s*[0-9]*", "minor: $minor"
-        $content = $content -replace "patch:\s*[0-9]*", "patch: $patch"
-        $content = $content -replace "buildDate:\s*new Date\(\)\.toISOString\(\)", "buildDate: '$buildDate'"
-        $content = $content -replace "buildNumber:\s*Math\.floor\(Date\.now\(\)\s*/\s*1000\)", "buildNumber: $buildNumber"
+        # CRITICAL FIX: Only target VERSION object properties, never function parameters
+        # The VERSION object starts with: export const VERSION = {
+        # We target only lines within that specific object context
+        
+        # Split content to work with VERSION object only
+        $versionObjectStart = $content.IndexOf("export const VERSION = {")
+        $versionObjectEnd = $content.IndexOf("};", $versionObjectStart) + 2
+        
+        if ($versionObjectStart -ge 0 -and $versionObjectEnd -gt $versionObjectStart) {
+            $versionObjectContent = $content.Substring($versionObjectStart, $versionObjectEnd - $versionObjectStart)
+            $restOfContent = $content.Substring($versionObjectEnd)
+            
+            # Update only the VERSION object content
+            $updatedVersionObject = $versionObjectContent
+            $updatedVersionObject = $updatedVersionObject -replace "(?<!\w)version:\s*'[^']*'(?=\s*,|\s*//)", "version: '$NewVersion'"
+            $updatedVersionObject = $updatedVersionObject -replace "(?<!\w)major:\s*[0-9]*(?=\s*,|\s*//)", "major: $major"
+            $updatedVersionObject = $updatedVersionObject -replace "(?<!\w)minor:\s*[0-9]*(?=\s*,|\s*//)", "minor: $minor"
+            $updatedVersionObject = $updatedVersionObject -replace "(?<!\w)patch:\s*[0-9]*(?=\s*,|\s*//)", "patch: $patch"
+            $updatedVersionObject = $updatedVersionObject -replace "(?<!\w)buildDate:\s*'[^']*'(?=\s*,|\s*//)", "buildDate: '$buildDate'"
+            $updatedVersionObject = $updatedVersionObject -replace "(?<!\w)buildNumber:\s*[0-9]*(?=\s*,|\s*//)", "buildNumber: $buildNumber"
+            
+            # Reconstruct the file
+            $content = $updatedVersionObject + $restOfContent
+        }
 
         Set-Content -Path $VERSION_FILE -Value $content -NoNewline
         Write-LogSuccess "Updated src/version.ts"
@@ -273,7 +303,7 @@ function Test-EnvFileContent {
     
     if ($content -match '\s+=\s+["''].*["'']\s*$') {
         Write-LogWarning "Found variables with quotes around values"
-        Write-LogInfo "Variables should use format: VARIABLE=value (no quotes needed)"
+        Write-LogInfo "Variables should avoid quotes unless absolutely necessary"
     }
     
     Write-LogSuccess "Environment file validation complete"
@@ -418,7 +448,7 @@ function Main {
     
     # Header
     Write-Host "========================================================" -ForegroundColor $GREEN
-    Write-Host "🚀 Enhanced Finfluencer Tracker Docker Update Script" -ForegroundColor $GREEN
+    Write-Host "🚀 Enhanced Finfluencer Tracker Docker Update Script (FINAL FIXED VERSION)" -ForegroundColor $GREEN
     Write-Host "========================================================" -ForegroundColor $GREEN
     Write-LogInfo "DockerHub Username: $DOCKERHUB_USERNAME"
     Write-LogInfo "Image Name: $IMAGE_NAME"
@@ -483,7 +513,12 @@ function Main {
             Write-LogWarning "Skipping local test (-SkipTest flag used)"
         }
         
-        Push-ToHub -Version $actualVersion
+        # Only push to DockerHub if not skipping publish
+        if (-not $SkipPublish) {
+            Push-ToHub -Version $actualVersion
+        } else {
+            Write-LogWarning "Skipping DockerHub publish (-SkipPublish flag used)"
+        }
         
         # Push to Git if not skipped
         if (-not $NoGit) {
@@ -498,10 +533,10 @@ function Main {
     Write-LogSuccess "🎉 Enhanced update completed successfully!"
     Write-Host ""
     Write-LogInfo "Version: $actualVersion"
-    if (-not $NoGit) {
+    if (-not $NoGit -and -not $SkipPublish) {
         Write-LogInfo "DockerHub: $IMAGE_NAME`:$actualVersion"
     }
-    Write-LogInfo "Updated files: package.json, src/version.ts"
+    Write-LogInfo "Updated files: package.json, src/version.ts, src/index.ts"
     
     if (-not $NoGit) {
         Write-Host ""

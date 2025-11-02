@@ -1,16 +1,13 @@
-// Finfluencer Tracker - Version Information
-// This file is automatically managed by the update scripts
-
 export const VERSION = {
   // Semantic Version
-  version: '1.1.5',
+  version: '1.1.11',
   major: 1,
   minor: 1,
-  patch: 5,
+  patch: 11,
   
   // Build Information
-  buildDate: '2025-11-02T19:13:33.918Z',
-  buildNumber: 63897707613,
+  buildDate: '2025-11-02T23:17:06.498Z',
+  buildNumber: 63897722226,
   
   // Git Information (populated by CI/CD)
   gitHash: process.env.GIT_COMMIT || 'unknown',

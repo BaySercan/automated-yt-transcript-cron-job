@@ -30,7 +30,7 @@ class FinfluencerTracker {
   async run(): Promise<void> {
     try {
       logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
-        version: '1.1.5',
+        version: '1.1.11',
         environment: config.timezone,
         model: config.openrouterModel
       });
@@ -173,7 +173,7 @@ class FinfluencerTracker {
 
       logger.info(`📹 Found ${filteredVideos.length} new videos for ${channel.channel_name}`);
 
-      // Process each video
+      // Process each video - ALWAYS increment processed_videos for every video attempted
       for (const video of filteredVideos) {
         if (this.isShuttingDown) {
           logger.info('Shutdown requested, stopping video processing');
@@ -188,9 +188,11 @@ class FinfluencerTracker {
           // ignore invalid dates
         }
 
+        // Increment processed_videos at the start - this ensures all attempted videos are counted
+        this.stats.processed_videos++;
+
         try {
           await this.processVideo(video, channel);
-          this.stats.processed_videos++;
         } catch (error) {
           logger.error(`Failed to process video ${video.videoId}`, { error });
           this.stats.errors++;
@@ -271,7 +273,7 @@ class FinfluencerTracker {
           ai_modifications: []
         });
         this.stats.videos_without_captions = (this.stats.videos_without_captions || 0) + 1;
-        return; // consider processed (caller increments processed_videos)
+        return;
       }
 
       // Analyze with AI (only when we have valid captions)
