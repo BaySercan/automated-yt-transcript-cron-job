@@ -3,10 +3,10 @@
 
 export const VERSION = {
   // Semantic Version
-  version: '1.1.4',
+  version: '1.1.5',
   major: 1,
   minor: 1,
-  patch: 4,
+  patch: 5,
   
   // Build Information
   buildDate: '2025-11-02T19:13:33.918Z',
