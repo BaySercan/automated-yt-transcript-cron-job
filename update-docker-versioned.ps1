@@ -227,12 +227,12 @@ function Push-ToGit {
     param([string]$Version)
     
     $gitStatus = git rev-parse --git-dir 2>$null
-    if ($gitStatus) {
+    <# if ($gitStatus) {
         Write-LogInfo "Pushing to Git"
         git push origin 2>$null
         git push origin $Version 2>$null
         Write-LogSuccess "Pushed to Git"
-    }
+    } #>
 }
 
 function Test-EnvFile {
@@ -439,11 +439,12 @@ function Main {
     }
     
     # Sync versions across files if requested
-    if ($SyncVersions) {
+    if ($SyncVersions -or $true) {
         Write-LogInfo "🔄 Synchronizing versions across project files..."
         
         Update-PackageJson -NewVersion $actualVersion
         Update-VersionTs -NewVersion $actualVersion
+        Update-IndexTs -NewVersion $actualVersion
         
         if (-not $NoGit) {
             Save-Changes -Version $actualVersion

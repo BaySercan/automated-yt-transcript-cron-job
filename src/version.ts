@@ -3,14 +3,14 @@
 
 export const VERSION = {
   // Semantic Version
-  version: '1.1.3',
+  version: '1.1.4',
   major: 1,
   minor: 1,
-  patch: 3,
+  patch: 4,
   
   // Build Information
-  buildDate: new Date().toISOString(),
-  buildNumber: Math.floor(Date.now() / 1000),
+  buildDate: '2025-11-02T19:13:33.918Z',
+  buildNumber: 63897707613,
   
   // Git Information (populated by CI/CD)
   gitHash: process.env.GIT_COMMIT || 'unknown',
@@ -59,14 +59,14 @@ export function validateVersion(version: string): boolean {
   return VERSION_PATTERNS.semver.test(version);
 }
 
-export function parseVersion(version: string): {cmajor: number, cminor: number, cpatch: number, preRelease?: string} | null {
+export function parseVersion(version: string): {cmajor: 1number, cminor: 1number, cpatch: 4number, preRelease?: string} | null {
   const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
   if (!match) return null;
   
   return {
-    cmajor: parseInt(match[1], 10),
-    cminor: parseInt(match[2], 10),
-    cpatch: parseInt(match[3], 10),
+    cmajor: 1parseInt(match[1], 10),
+    cminor: 1parseInt(match[2], 10),
+    cpatch: 4parseInt(match[3], 10),
     preRelease: match[4]
   };
 }
