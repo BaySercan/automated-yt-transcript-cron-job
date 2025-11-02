@@ -3,6 +3,12 @@ import { RapidAPITranscriptResponse, RapidAPIResult } from './types';
 import { TranscriptError } from './errors';
 import { logger, retryWithBackoff, RateLimiter, TranscriptLogger, TranscriptMetrics } from './utils';
 
+export interface VideoInfo {
+  automatic_captions?: any;
+  default_language?: string;
+  [key: string]: any;
+}
+
 export class RapidAPIService {
   private rateLimiter: RateLimiter;
 
@@ -32,6 +38,53 @@ export class RapidAPIService {
     } catch (error) {
       logger.warn('RapidAPI connection test failed', { error });
       return false;
+    }
+  }
+
+  // Get video info including automatic_captions from /info endpoint
+  async getVideoInfo(videoId: string): Promise<VideoInfo | null> {
+    if (!config.rapidapiKey || config.rapidapiKey.length < 10) {
+      throw new TranscriptError('RapidAPI key not configured');
+    }
+
+    if (!videoId || !videoId.trim()) {
+      throw new TranscriptError('Invalid video ID');
+    }
+
+    try {
+      logger.info(`Fetching video info from RapidAPI /info endpoint for video ${videoId}`);
+      
+      await this.rateLimiter.wait();
+      
+      const url = `${config.rapidapiUrl}/info?url=https://www.youtube.com/watch?v=${videoId}`;
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'X-RapidAPI-Host': config.rapidapiHost,
+          'X-RapidAPI-Key': config.rapidapiKey,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new TranscriptError(`RapidAPI /info endpoint failed: HTTP ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json() as VideoInfo;
+      
+      // Log some info about what we received
+      logger.info(`📋 Received video info for ${videoId}:`, {
+        hasAutomaticCaptions: !!data.automatic_captions,
+        defaultLanguage: data.language,
+        availableFields: Object.keys(data).filter(key => !key.startsWith('_'))
+      });
+
+      return data;
+      
+    } catch (error) {
+      logger.error(`RapidAPI /info endpoint failed for video ${videoId}`, { error });
+      throw new TranscriptError(`RapidAPI /info failed: ${(error as Error).message}`);
     }
   }
 

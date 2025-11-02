@@ -159,6 +159,35 @@ export class SupabaseService {
     }
   }
 
+  // Update prediction with retry results
+  async updatePredictionWithRetry(predictionId: string, updates: {
+    transcript_summary: string;
+    predictions: any[];
+    ai_modifications: any[];
+    language: string;
+  }): Promise<void> {
+    try {
+      const { error } = await this.client
+        .from('finfluencer_predictions')
+        .update({
+          transcript_summary: updates.transcript_summary,
+          predictions: updates.predictions,
+          ai_modifications: updates.ai_modifications,
+          language: updates.language
+        })
+        .eq('id', predictionId);
+
+      if (error) {
+        throw new DatabaseError(`Failed to update prediction with retry: ${error.message}`, { cause: error });
+      }
+
+      logger.debug(`Updated prediction ${predictionId} with retry results`);
+    } catch (error) {
+      logger.error(`Error updating prediction ${predictionId} with retry`, { error });
+      throw error;
+    }
+  }
+
   // Get channel statistics
   async getChannelStats(channelId: string): Promise<{
     totalVideos: number;
@@ -322,6 +351,11 @@ export class SupabaseService {
         stats: null
       };
     }
+  }
+
+  // Get the underlying Supabase client for custom queries
+  getClient(): SupabaseClient {
+    return this.client;
   }
 
   // Helper method to check if table exists

@@ -3,6 +3,7 @@ import { supabaseService } from './supabase';
 import { youtubeService, YouTubeService } from './youtube';
 import { aiAnalyzer } from './analyzer';
 import { rapidapiService } from './rapidapi';
+import { retryService } from './retryService';
 import { logger, setupGracefulShutdown, getMemoryUsage, parseYouTubeDuration } from './utils';
 import { CronJobStats } from './types';
 import { ConfigurationError } from './errors';
@@ -42,6 +43,9 @@ class FinfluencerTracker {
 
       // Process all active channels
       await this.processAllChannels();
+
+      // Process failed predictions (idle-time retry)
+      await this.processFailedPredictions();
 
       // Log final statistics
       this.logFinalStats();
@@ -105,6 +109,40 @@ class FinfluencerTracker {
 
       // Small delay between channels to avoid rate limiting
       await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+
+  // Process failed predictions during idle time
+  private async processFailedPredictions(): Promise<void> {
+    try {
+      logger.info('🔄 Starting idle-time retry processing for failed predictions');
+      
+      // Check if we have retry statistics to show potential candidates
+      const retryStats = await retryService.getRetryStatistics();
+      
+      if (retryStats.totalEligible === 0) {
+        logger.info('✅ No failed predictions found that need retry');
+        return;
+      }
+
+      logger.info(`📋 Found ${retryStats.totalEligible} records that may need retry`, {
+        maxAttemptsReached: retryStats.maxAttemptsReached
+      });
+
+      // Process failed predictions
+      await retryService.processFailedPredictions();
+      
+      // Get updated statistics
+      const finalStats = await retryService.getRetryStatistics();
+      logger.info('✅ Retry processing completed', {
+        remainingEligible: finalStats.totalEligible,
+        maxAttemptsReached: finalStats.maxAttemptsReached
+      });
+      
+    } catch (error) {
+      logger.error('❌ Retry processing failed', { error });
+      this.stats.errors++;
+      // Don't throw - retry failures shouldn't stop the main process
     }
   }
 
