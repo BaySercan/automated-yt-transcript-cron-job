@@ -38,6 +38,7 @@ $LOCAL_IMAGE_NAME = "finfluencer-tracker"
 $ENV_FILE = ".env"
 $PACKAGE_JSON = "package.json"
 $VERSION_FILE = "src/version.ts"
+$INDEX_FILE = "src/index.ts"
 
 # Colors for PowerShell output
 $RED = "Red"
@@ -165,6 +166,22 @@ function Update-PackageJson {
     }
 }
 
+function Update-IndexTs {
+    param([string]$NewVersion)
+    
+    $NewVersion = $NewVersion -replace '^v', ''  # Remove v prefix for package.json
+    
+    if (Test-Path $INDEX_FILE) {
+        Write-LogInfo "Updating src/index.ts version to $NewVersion"
+        $content = Get-Content $INDEX_FILE -Raw
+        $updatedContent = $content -replace '"version":\s*"[^"]*"', "`"version`": `"$NewVersion`""
+        Set-Content -Path $INDEX_FILE -Value $updatedContent -NoNewline
+        Write-LogSuccess "Updated src/index.ts"
+    } else {
+        Write-LogWarning "src/index.ts not found, skipping update"
+    }
+}
+
 function Update-VersionTs {
     param([string]$NewVersion)
     
@@ -183,13 +200,13 @@ function Update-VersionTs {
         $content = Get-Content $VERSION_FILE -Raw
         
         # Update version.ts using correct regex patterns for the object structure
-        $content = $content -replace "version:\s*'[^']*'", "version: '$NewVersion'"
-        $content = $content -replace "major:\s*[0-9]*", "major: $major"
-        $content = $content -replace "minor:\s*[0-9]*", "minor: $minor"
-        $content = $content -replace "patch:\s*[0-9]*", "patch: $patch"
-        $content = $content -replace "buildDate:\s*new Date\(\)\.toISOString\(\)", "buildDate: '$buildDate'"
-        $content = $content -replace "buildNumber:\s*Math\.floor\(Date\.now\(\)\s*/\s*1000\)", "buildNumber: $buildNumber"
-        
+        $content = $content -replace "^version:\s*'[^']*'", "version: '$NewVersion'"
+        $content = $content -replace "^major:\s*[0-9]*", "major: $major"
+        $content = $content -replace "^minor:\s*[0-9]*", "minor: $minor"
+        $content = $content -replace "^patch:\s*[0-9]*", "patch: $patch"
+        $content = $content -replace "^buildDate:\s*new Date\(\)\.toISOString\(\)", "buildDate: '$buildDate'"
+        $content = $content -replace "^buildNumber:\s*Math\.floor\(Date\.now\(\)\s*/\s*1000\)", "buildNumber: $buildNumber"
+
         Set-Content -Path $VERSION_FILE -Value $content -NoNewline
         Write-LogSuccess "Updated src/version.ts"
     } else {
