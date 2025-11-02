@@ -7,11 +7,13 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
 
-# Copy source code
-COPY . .
-
-# Build the application
-RUN npm run build
+# Copy source code and necessary files (explicitly excluding sensitive files)
+COPY src/ ./src/
+COPY dist/ ./dist/
+COPY tsconfig.json ./
+COPY package*.json ./
+COPY README.md ./
+COPY .env.example ./
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
