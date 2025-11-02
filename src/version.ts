@@ -3,10 +3,10 @@
 
 export const VERSION = {
   // Semantic Version
-  version: '20251101-212156',
-  major: ,
-  minor: 0,
-  patch: 0,
+  version: '1.1.3',
+  major: 1,
+  minor: 1,
+  patch: 3,
   
   // Build Information
   buildDate: new Date().toISOString(),
@@ -59,14 +59,14 @@ export function validateVersion(version: string): boolean {
   return VERSION_PATTERNS.semver.test(version);
 }
 
-export function parseVersion(version: string): {major: number, minor: 0number, patch: 0number, preRelease?: string} | null {
+export function parseVersion(version: string): {cmajor: number, cminor: number, cpatch: number, preRelease?: string} | null {
   const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
   if (!match) return null;
   
   return {
-    major: parseInt(match[1], 10),
-    minor: 0parseInt(match[2], 10),
-    patch: 0parseInt(match[3], 10),
+    cmajor: parseInt(match[1], 10),
+    cminor: parseInt(match[2], 10),
+    cpatch: parseInt(match[3], 10),
     preRelease: match[4]
   };
 }
@@ -79,11 +79,11 @@ export function bumpVersion(currentVersion: string, type: 'major' | 'minor' | 'p
   
   switch (type) {
     case 'major':
-      return `${parsed.major + 1}.0.0${parsed.preRelease ? '-' + parsed.preRelease : ''}`;
+      return `${parsed.cmajor + 1}.0.0${parsed.preRelease ? '-' + parsed.preRelease : ''}`;
     case 'minor':
-      return `${parsed.major}.${parsed.minor + 1}.0${parsed.preRelease ? '-' + parsed.preRelease : ''}`;
+      return `${parsed.cmajor}.${parsed.cminor + 1}.0${parsed.preRelease ? '-' + parsed.preRelease : ''}`;
     case 'patch':
-      return `${parsed.major}.${parsed.minor}.${parsed.patch + 1}${parsed.preRelease ? '-' + parsed.preRelease : ''}`;
+      return `${parsed.cmajor}.${parsed.cminor}.${parsed.cpatch + 1}${parsed.preRelease ? '-' + parsed.preRelease : ''}`;
     default:
       throw new Error(`Invalid bump type: ${type}`);
   }

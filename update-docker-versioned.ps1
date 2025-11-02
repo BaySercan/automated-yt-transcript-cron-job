@@ -98,7 +98,7 @@ function Show-Help {
     Write-Host "  DockerHub username: $DOCKERHUB_USERNAME"
 }
 
-function Generate-Version {
+function New-Version {
     return "v$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
 
@@ -112,7 +112,7 @@ function Get-CurrentVersion {
     return "1.0.0"
 }
 
-function Bump-Version {
+function Update-Version {
     param(
         [string]$CurrentVersion,
         [string]$BumpType
@@ -178,15 +178,17 @@ function Update-VersionTs {
         $minor = [int]$versionParts[1]
         $patch = [int]$versionParts[2]
         $buildDate = Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ"
+        $buildNumber = [math]::Floor((Get-Date).Ticks / 10000000) # Unix timestamp
         
         $content = Get-Content $VERSION_FILE -Raw
         
-        # Update version.ts using regex replacements
-        $content = $content -replace "version: '[^']*'", "version: '$NewVersion'"
-        $content = $content -replace "major: [0-9]*", "major: $major"
-        $content = $content -replace "minor: [0-9]*", "minor: $minor"
-        $content = $content -replace "patch: [0-9]*", "patch: $patch"
-        $content = $content -replace "buildDate: '[^']*'", "buildDate: '$buildDate'"
+        # Update version.ts using correct regex patterns for the object structure
+        $content = $content -replace "version:\s*'[^']*'", "version: '$NewVersion'"
+        $content = $content -replace "major:\s*[0-9]*", "major: $major"
+        $content = $content -replace "minor:\s*[0-9]*", "minor: $minor"
+        $content = $content -replace "patch:\s*[0-9]*", "patch: $patch"
+        $content = $content -replace "buildDate:\s*new Date\(\)\.toISOString\(\)", "buildDate: '$buildDate'"
+        $content = $content -replace "buildNumber:\s*Math\.floor\(Date\.now\(\)\s*/\s*1000\)", "buildNumber: $buildNumber"
         
         Set-Content -Path $VERSION_FILE -Value $content -NoNewline
         Write-LogSuccess "Updated src/version.ts"
@@ -195,7 +197,7 @@ function Update-VersionTs {
     }
 }
 
-function Commit-Changes {
+function Save-Changes {
     param(
         [string]$Version,
         [string]$Message
@@ -242,7 +244,7 @@ function Test-EnvFile {
     Write-LogInfo "Found environment file: $ENV_FILE"
 }
 
-function Validate-EnvFile {
+function Test-EnvFileContent {
     Write-LogInfo "Validating .env file format..."
     
     # Check for common .env format issues
@@ -260,7 +262,7 @@ function Validate-EnvFile {
     Write-LogSuccess "Environment file validation complete"
 }
 
-function Build-Image {
+function New-DockerImage {
     param([string]$Version)
     
     $imageTag = "$LOCAL_IMAGE_NAME`:$Version"
@@ -306,23 +308,34 @@ function Push-ToHub {
     
     Write-LogInfo "Pushing to DockerHub: $remoteImage"
     
-    # Push specific version
+    # Ensure we have the local image
+    $localImageExists = & docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -eq $localImage }
+    if (-not $localImageExists) {
+        Write-LogError "Local image $localImage not found! Build the image first."
+        exit 1
+    }
+    
+    # Push specific version with proper tagging
+    Write-LogInfo "Tagging and pushing version: $Version"
     & docker tag $localImage $remoteImage
     & docker push $remoteImage
     
     # Push latest tag
+    Write-LogInfo "Tagging and pushing latest tag"
     & docker tag $localLatest $latestTag
     & docker push $latestTag
     
     if ($LASTEXITCODE -eq 0) {
-        Write-LogSuccess "Successfully pushed to DockerHub"
+        Write-LogSuccess "Successfully pushed to DockerHub:"
+        Write-LogInfo "  - $remoteImage"
+        Write-LogInfo "  - $latestTag"
     } else {
         Write-LogError "Failed to push to DockerHub"
         exit 1
     }
 }
 
-function Cleanup-Images {
+function Remove-OldImages {
     param([int]$KeepCount)
     
     Write-LogInfo "Cleaning up old Docker images (keeping last $KeepCount versions)..."
@@ -397,14 +410,14 @@ function Main {
     # If cleanup only mode
     if ($CleanupOnly) {
         Test-EnvFile
-        Validate-EnvFile
-        Cleanup-Images -KeepCount $KeepVersions
+        Test-EnvFileContent
+        Remove-OldImages -KeepCount $KeepVersions
         return
     }
     
     # Check environment
     Test-EnvFile
-    Validate-EnvFile
+    Test-EnvFileContent
     
     # Check Docker login only if not using -NoGit
     if (-not $NoGit) {
@@ -416,12 +429,12 @@ function Main {
     # Determine version
     if ($bumpType) {
         $currentVersion = Get-CurrentVersion
-        $actualVersion = Bump-Version -CurrentVersion $currentVersion -BumpType $bumpType
-        Write-LogInfo "Bumping $bumpType version: $currentVersion → $actualVersion"
+        $actualVersion = Update-Version -CurrentVersion $currentVersion -BumpType $bumpType
+        Write-LogInfo "Bumping $bumpType version: $currentVersion to $actualVersion"
     } elseif ($actualVersion) {
         Write-LogInfo "Using specified version: $actualVersion"
     } else {
-        $actualVersion = Generate-Version
+        $actualVersion = New-Version
         Write-LogInfo "Auto-generated version: $actualVersion"
     }
     
@@ -433,7 +446,7 @@ function Main {
         Update-VersionTs -NewVersion $actualVersion
         
         if (-not $NoGit) {
-            Commit-Changes -Version $actualVersion
+            Save-Changes -Version $actualVersion
         }
         
         Write-LogSuccess "✅ Version synchronization completed"
@@ -441,7 +454,7 @@ function Main {
     
     # Build, test, and push (only if not using -NoGit)
     if (-not $NoGit) {
-        Build-Image -Version $actualVersion
+        New-DockerImage -Version $actualVersion
         
         if (-not $SkipTest) {
             if (-not (Test-Image -Version $actualVersion)) {
@@ -460,7 +473,7 @@ function Main {
         }
         
         # Cleanup old images
-        Cleanup-Images -KeepCount $KeepVersions
+        Remove-OldImages -KeepCount $KeepVersions
     }
     
     # Show final state
