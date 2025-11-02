@@ -1,4 +1,4 @@
-# Automated YouTube Transcript Cron Job
+# Automated YouTube Transcript Generator v1.1.12
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
@@ -11,8 +11,18 @@ The cron job automatically:
 3. Downloads video transcripts using RapidAPI
 4. Analyzes transcripts using AI models hosted on OpenRouter
 5. Parses structured JSON output and saves to Supabase
-6. Updates channel processing timestamps
-7. Runs nightly at 23:30 (Europe/Istanbul, UTC+3)
+6. **Automatically retries failed predictions during idle time**
+7. Updates channel processing timestamps
+8. Runs nightly at 23:30 (Europe/Istanbul, UTC+3)
+
+## ✨ Key Features
+
+- **🔄 Intelligent Retry Service**: Automatic recovery mechanism for failed predictions
+- **📊 Batch Processing**: Efficient processing with rate limiting and error isolation
+- **🤖 AI-Powered Analysis**: Multiple AI model support via OpenRouter
+- **📝 Real-time Logging**: Comprehensive monitoring and statistics
+- **🛡️ Robust Error Handling**: Graceful degradation and recovery mechanisms
+- **⚡ Performance Optimized**: Memory-efficient processing with adaptive polling
 
 ## 🛠️ Tech Stack
 
@@ -37,12 +47,16 @@ The cron job automatically:
  ├─ types.ts             # Shared TypeScript interfaces
  ├─ utils.ts             # Logging, retries, JSON validation, etc.
  ├─ config.ts            # Environment configuration
- └─ errors.ts            # Custom error classes
+ ├─ errors.ts            # Custom error classes
+ ├─ retryService.ts      # Automatic retry service for failed predictions
+ ├─ jsonUtils.ts         # JSON validation and parsing utilities
+ └─ version.ts           # Version information and utilities
 Dockerfile
 .env.example
 package.json
 tsconfig.json
 README.md
+retry-service-documentation.md
 ```
 
 ## 🔐 Environment Variables
@@ -72,6 +86,11 @@ TZ=Europe/Istanbul
 
 # Logging Configuration
 LOG_LEVEL=info
+
+# Retry Service Configuration
+MAX_RETRY_ATTEMPTS=3
+RETRY_BATCH_SIZE=10
+RETRY_DELAY_BETWEEN_BATCHES=5000
 ```
 
 ## 🗄️ Database Schema
@@ -89,19 +108,22 @@ LOG_LEVEL=info
 
 ### Table 2 — `finfluencer_predictions`
 
-| Column             | Type      | Description               |
-| ------------------ | --------- | ------------------------- |
-| id                 | uuid (pk) | Auto                      |
-| channel_id         | text      | YouTube channel ID        |
-| channel_name       | text      | Channel name              |
-| video_id           | text      | YouTube video ID          |
-| video_title        | text      | Video title               |
-| post_date          | date      | Video publish date        |
-| language           | text      | Detected language         |
-| transcript_summary | text      | Summary of content        |
-| predictions        | jsonb     | JSON array of predictions |
-| ai_modifications   | jsonb     | JSON corrections (if any) |
-| created_at         | timestamp | Default now()             |
+| Column             | Type      | Description                       |
+| ------------------ | --------- | --------------------------------- |
+| id                 | uuid (pk) | Auto                              |
+| channel_id         | text      | YouTube channel ID                |
+| channel_name       | text      | Channel name                      |
+| video_id           | text      | YouTube video ID                  |
+| video_title        | text      | Video title                       |
+| post_date          | date      | Video publish date                |
+| language           | text      | Detected language                 |
+| transcript_summary | text      | Summary of content                |
+| predictions        | jsonb     | JSON array of predictions         |
+| ai_modifications   | jsonb     | JSON corrections (if any)         |
+| **retry_count**    | integer   | **Number of retry attempts (0-3)**|
+| **last_retry_at**  | timestamp | **Last retry attempt timestamp**  |
+| **retry_reason**   | text      | **Error message from failures**   |
+| created_at         | timestamp | Default now()                     |
 
 ## 🚀 Installation & Setup
 
@@ -144,19 +166,25 @@ npm start
 ### Build Docker Image
 
 ```bash
-docker build -t finfluencer-tracker .
+docker build -t finfluencer-tracker:v1.1.12 .
 ```
 
 ### Run with Environment File
 
 ```bash
-docker run --env-file .env finfluencer-tracker
+docker run --env-file .env finfluencer-tracker:v1.1.12
 ```
 
 ### Run in Background
 
 ```bash
-docker run -d --name finfluencer-tracker --env-file .env finfluencer-tracker
+docker run -d --name finfluencer-tracker --env-file .env finfluencer-tracker:v1.1.12
+```
+
+### Update to Latest Version
+
+```bash
+update-docker-versioned.ps1
 ```
 
 ## 🌐 Northflank Deployment
@@ -183,6 +211,7 @@ Check Northflank logs for:
 - Number of channels processed
 - New videos found
 - Analysis results
+- **Retry service statistics**
 - Any errors
 
 ## 🧠 AI Analysis
@@ -243,16 +272,48 @@ The service supports various AI models through OpenRouter. You can configure the
 4. **Transcript Processing**: Download transcripts using RapidAPI
 5. **AI Analysis**: Send transcripts to OpenRouter for analysis
 6. **Data Storage**: Save structured results to Supabase
-7. **Cleanup**: Update timestamps and log statistics
+7. **Idle-Time Retry**: **Process failed predictions automatically**
+8. **Cleanup**: Update timestamps and log statistics
+
+## 🔄 Retry Service
+
+The integrated retry service provides automatic recovery for failed predictions:
+
+### Key Features
+
+- **Smart Target Selection**: Processes records with empty predictions array
+- **Intelligent Batch Processing**: 10 records per batch with 5-second delays
+- **Maximum 3 Attempts**: Prevents infinite retry loops
+- **Priority Processing**: Newer records processed first
+- **Comprehensive Logging**: Detailed statistics and error tracking
+
+### Retry Logic
+
+1. **Target Selection**: Find records where `predictions = '[]'` and `retry_count < 3`
+2. **Batch Processing**: Process 10 records at a time with delays
+3. **Video Info Retrieval**: Get video information from RapidAPI
+4. **Caption URL Selection**: Find best available caption URL (default language → English → any)
+5. **Transcript Fetching**: Retrieve and parse YouTube JSON3 format
+6. **AI Analysis**: Analyze recovered transcripts
+7. **Database Update**: Update existing records with successful results
+
+### Retry Statistics
+
+The service provides comprehensive statistics:
+- Total eligible records for retry
+- Records that reached maximum attempts
+- Success/failure rates per batch
+- Detailed error reasons and patterns
 
 ## 🛡️ Error Handling
 
-- **Retry Logic**: Automatic retries with exponential backoff
+- **Retry Logic**: **Automatic retries with exponential backoff for failed predictions**
 - **Graceful Degradation**: Creates basic records even if analysis fails
 - **Rate Limiting**: Respects API quotas for YouTube, RapidAPI, and OpenRouter
 - **Graceful Shutdown**: Handles SIGTERM/SIGINT signals properly
 - **Validation**: Comprehensive input validation and sanitization
 - **Timeout Protection**: Configurable timeouts for API calls
+- **Error Isolation**: Retry failures don't stop the main processing pipeline
 
 ## 📊 Monitoring & Logging
 
@@ -261,6 +322,7 @@ The service provides comprehensive logging:
 - 🚀 Startup and connection tests
 - 📺 Channel processing status
 - 📹 Video fetching and analysis
+- 🔄 **Retry service statistics and batch processing**
 - ✅ Success/failure rates
 - 📊 Final statistics summary
 - 🧠 Memory usage tracking
@@ -269,8 +331,8 @@ The service provides comprehensive logging:
 ### Log Levels
 
 - `info`: General progress information
-- `warn`: Non-fatal issues
-- `error`: Fatal errors
+- `warn`: Non-fatal issues, retry failures
+- `error`: Fatal errors, complete retry failures
 - `debug`: Detailed debugging info
 
 ## 🔧 Configuration Options
@@ -292,13 +354,20 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
 - `REQUEST_TIMEOUT`: API timeout in ms (default: 90000)
 - `RAPIDAPI_MAX_POLL_TIME`: Maximum time to wait for transcript (default: 300000ms)
 
+### Retry Service Configuration
+
+- `MAX_RETRY_ATTEMPTS`: Maximum retry attempts per record (default: 3)
+- `RETRY_BATCH_SIZE`: Records processed per batch (default: 10)
+- `RETRY_DELAY_BETWEEN_BATCHES`: Delay between batches in ms (default: 5000)
+
 ## 📈 Performance
 
 - **Memory Efficient**: Streams large transcripts, minimal memory footprint
 - **Rate Limited**: Respects API quotas to avoid bans
-- **Batch Processing**: Efficient database operations
+- **Batch Processing**: Efficient database operations and retry processing
 - **Container Optimized**: Small Alpine Linux base image
 - **Adaptive Polling**: RapidAPI polling adapts to processing time
+- **Idle-Time Processing**: Uses remaining processing time for recovery operations
 
 ## 🐛 Troubleshooting
 
@@ -326,12 +395,32 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
    - Some videos don't have transcripts
    - Service logs warnings but continues processing
 
+6. **High Retry Rates**
+   - Check RapidAPI connectivity
+   - Verify AI analyzer functionality
+   - Review network connectivity
+
+7. **No Records Being Retried**
+   - Check `predictions` field is truly empty array
+   - Verify `retry_count < MAX_RETRY_ATTEMPTS`
+   - Ensure records exist in database
+
 ### Debug Mode
 
 Set `LOG_LEVEL=debug` for detailed logging:
 
 ```bash
 LOG_LEVEL=debug npm run dev
+```
+
+### Retry Service Debug Commands
+
+```typescript
+// Get retry statistics
+const stats = await retryService.getRetryStatistics();
+
+// Process specific batch
+await retryService.processFailedPredictions();
 ```
 
 ## 📝 Development
@@ -343,6 +432,7 @@ LOG_LEVEL=debug npm run dev
 3. Add error handling in `src/errors.ts`
 4. Update configuration in `src/config.ts`
 5. Add logging with the logger utility
+6. **Update retry service logic if needed in `src/retryService.ts`**
 
 ### Testing
 
@@ -357,6 +447,24 @@ npm start
 - Comprehensive error handling
 - Detailed logging
 - Modular architecture
+- **Retry service integration testing**
+
+### Version Management
+
+The project uses semantic versioning (v1.1.12):
+- **Major**: Breaking changes
+- **Minor**: New features, backwards compatible
+- **Patch**: Bug fixes, backwards compatible
+
+### Documentation Updates
+
+- Update `README.md` for user-facing changes
+- Update `retry-service-documentation.md` for retry service changes
+- Update `src/version.ts` for version information
+
+## 📚 Additional Documentation
+
+- **[Retry Service Documentation](retry-service-documentation.md)**: Detailed documentation about the retry service implementation, configuration, and troubleshooting
 
 ## 📄 License
 
@@ -368,7 +476,8 @@ MIT License - see LICENSE file for details
 2. Create a feature branch
 3. Make your changes
 4. Add tests if applicable
-5. Submit a pull request
+5. Update documentation
+6. Submit a pull request
 
 ## 📞 Support
 
@@ -378,6 +487,16 @@ For issues and questions:
 2. Review the logs for error details
 3. Verify environment variables
 4. Check API service status
+5. Consult the retry service documentation
+
+## 🔄 Recent Updates (v1.1.12)
+
+- ✨ **New Retry Service**: Automatic recovery mechanism for failed predictions
+- 📊 **Enhanced Error Handling**: Sophisticated retry logic with batch processing
+- 🔧 **Configuration Updates**: New retry-related environment variables
+- 📝 **Documentation**: Comprehensive retry service documentation
+- 🎯 **Performance Improvements**: Idle-time processing optimization
+- 🐛 **Bug Fixes**: Various stability improvements
 
 ---
 
