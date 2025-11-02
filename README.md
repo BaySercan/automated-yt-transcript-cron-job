@@ -8,21 +8,23 @@ The cron job automatically:
 
 1. Fetches active YouTube channel IDs from a Supabase table
 2. Retrieves new videos since each channel's last check date
-3. Downloads video transcripts using RapidAPI
-4. Analyzes transcripts using AI models hosted on OpenRouter
-5. Parses structured JSON output and saves to Supabase
-6. **Automatically retries failed predictions during idle time**
-7. Updates channel processing timestamps
-8. Runs nightly at 23:30 (Europe/Istanbul, UTC+3)
+3. Downloads video transcripts using YouTube Data API v3 + RapidAPI
+4. Validates transcript quality (minimum 50 characters, real captions)
+5. Analyzes transcripts using AI models hosted on OpenRouter
+6. Parses structured JSON output and saves to Supabase
+7. **Automatically retries failed predictions during idle time**
+8. Updates channel processing timestamps
+9. Runs nightly at 23:30 (Europe/Istanbul, UTC+3)
 
 ## ✨ Key Features
 
 - **🔄 Intelligent Retry Service**: Automatic recovery mechanism for failed predictions
 - **📊 Batch Processing**: Efficient processing with rate limiting and error isolation
 - **🤖 AI-Powered Analysis**: Multiple AI model support via OpenRouter
-- **📝 Real-time Logging**: Comprehensive monitoring and statistics
+- **📝 Real-time Logging**: Comprehensive monitoring and statistics with CronJobStats
 - **🛡️ Robust Error Handling**: Graceful degradation and recovery mechanisms
 - **⚡ Performance Optimized**: Memory-efficient processing with adaptive polling
+- **🎯 Transcript Validation**: Heuristic validation to ensure real captions/subtitles
 
 ## 🛠️ Tech Stack
 
@@ -39,24 +41,90 @@ The cron job automatically:
 
 ```
 /src
- ├─ index.ts             # Entry point: main cron logic
- ├─ youtube.ts           # YouTube fetch utilities
+ ├─ index.ts             # Main FinfluencerTracker class with cron logic
+ ├─ youtube.ts           # YouTube Data API v3 service
  ├─ rapidapi.ts          # RapidAPI transcript service
- ├─ analyzer.ts          # Sends transcript to OpenRouter, parses response
- ├─ supabase.ts          # Handles database read/write
- ├─ types.ts             # Shared TypeScript interfaces
- ├─ utils.ts             # Logging, retries, JSON validation, etc.
- ├─ config.ts            # Environment configuration
+ ├─ analyzer.ts          # AI analysis using OpenRouter
+ ├─ supabase.ts          # Database operations and health checks
+ ├─ types.ts             # TypeScript interfaces and types
+ ├─ utils.ts             # Logging, retries, JSON validation, utilities
+ ├─ config.ts            # Environment configuration and validation
  ├─ errors.ts            # Custom error classes
  ├─ retryService.ts      # Automatic retry service for failed predictions
- ├─ jsonUtils.ts         # JSON validation and parsing utilities
- └─ version.ts           # Version information and utilities
-Dockerfile
-.env.example
-package.json
-tsconfig.json
-README.md
-retry-service-documentation.md
+ ├─ jsonUtils.ts         # JSON parsing and validation utilities
+ └─ version.ts           # Version management and build information
+```
+
+Additional files:
+```
+retry-service-documentation.md  # Comprehensive retry service docs
+update-docker-versioned.ps1     # Docker version update script
+```
+
+## 🗄️ Database Schema
+
+### Table 1 — `finfluencer_channels`
+
+| Column          | Type      | Description                     |
+| --------------- | --------- | ------------------------------- |
+| id              | uuid (pk) | Auto-generated UUID             |
+| channel_id      | text      | YouTube channel ID              |
+| channel_name    | text      | Channel's display name          |
+| is_active       | boolean   | Whether to include this channel |
+| last_checked_at | timestamp | Date last processed             |
+| added_at        | timestamp | Default now()                   |
+
+### Table 2 — `finfluencer_predictions`
+
+| Column             | Type      | Description                       |
+| ------------------ | --------- | --------------------------------- |
+| id                 | uuid (pk) | Auto-generated UUID               |
+| channel_id         | text      | YouTube channel ID                |
+| channel_name       | text      | Channel name                      |
+| video_id           | text      | YouTube video ID                  |
+| video_title        | text      | Video title                       |
+| post_date          | date      | Video publish date                |
+| language           | text      | Detected language                 |
+| transcript_summary | text      | Summary of content                |
+| predictions        | jsonb     | JSON array of predictions         |
+| ai_modifications   | jsonb     | JSON corrections (if any)         |
+| retry_count        | integer   | Number of retry attempts (0-3)    |
+| last_retry_at      | timestamp | Last retry attempt timestamp      |
+| retry_reason       | text      | Error message from failures       |
+| created_at         | timestamp | Default now()                     |
+
+### Data Structures
+
+**Prediction Interface:**
+```typescript
+interface Prediction {
+  asset: string;                    // e.g., "BTC", "AAPL"
+  sentiment: 'bullish'|'bearish'|'neutral';
+  prediction_text: string;          // Full prediction text
+  prediction_date: string;          // When prediction was made
+  horizon: {                        // Time horizon for prediction
+    type: 'exact'|'end_of_year'|'quarter'|'month'|'custom';
+    value: string;                  // Date or period value
+  };
+  target_price: number|null;        // Target price if mentioned
+  confidence: 'low'|'medium'|'high'; // AI confidence level
+}
+```
+
+**CronJobStats Interface:**
+```typescript
+interface CronJobStats {
+  total_channels: number;
+  processed_channels: number;
+  total_videos: number;
+  processed_videos: number;
+  skipped_videos: number;
+  videos_with_captions: number;
+  videos_without_captions: number;
+  errors: number;
+  start_time: Date;
+  end_time?: Date;
+}
 ```
 
 ## 🔐 Environment Variables
@@ -92,38 +160,6 @@ MAX_RETRY_ATTEMPTS=3
 RETRY_BATCH_SIZE=10
 RETRY_DELAY_BETWEEN_BATCHES=5000
 ```
-
-## 🗄️ Database Schema
-
-### Table 1 — `finfluencer_channels`
-
-| Column          | Type      | Description                     |
-| --------------- | --------- | ------------------------------- |
-| id              | uuid (pk) | Auto                            |
-| channel_id      | text      | YouTube channel ID              |
-| channel_name    | text      | Channel's display name          |
-| is_active       | boolean   | Whether to include this channel |
-| last_checked_at | timestamp | Date last processed             |
-| added_at        | timestamp | Default now()                   |
-
-### Table 2 — `finfluencer_predictions`
-
-| Column             | Type      | Description                       |
-| ------------------ | --------- | --------------------------------- |
-| id                 | uuid (pk) | Auto                              |
-| channel_id         | text      | YouTube channel ID                |
-| channel_name       | text      | Channel name                      |
-| video_id           | text      | YouTube video ID                  |
-| video_title        | text      | Video title                       |
-| post_date          | date      | Video publish date                |
-| language           | text      | Detected language                 |
-| transcript_summary | text      | Summary of content                |
-| predictions        | jsonb     | JSON array of predictions         |
-| ai_modifications   | jsonb     | JSON corrections (if any)         |
-| **retry_count**    | integer   | **Number of retry attempts (0-3)**|
-| **last_retry_at**  | timestamp | **Last retry attempt timestamp**  |
-| **retry_reason**   | text      | **Error message from failures**   |
-| created_at         | timestamp | Default now()                     |
 
 ## 🚀 Installation & Setup
 
@@ -264,16 +300,54 @@ The service supports various AI models through OpenRouter. You can configure the
 }
 ```
 
-## 🔄 Workflow
+## 🔄 Detailed Workflow
 
-1. **Startup**: Validate configuration and test connections
-2. **Channel Fetch**: Get all active channels from Supabase
-3. **Video Discovery**: For each channel, find new videos since last check
-4. **Transcript Processing**: Download transcripts using RapidAPI
-5. **AI Analysis**: Send transcripts to OpenRouter for analysis
-6. **Data Storage**: Save structured results to Supabase
-7. **Idle-Time Retry**: **Process failed predictions automatically**
-8. **Cleanup**: Update timestamps and log statistics
+### Main Processing Pipeline
+
+1. **Application Startup**
+   - Validate configuration using `validateConfig()`
+   - Test connections to all external services (Supabase, YouTube, OpenRouter, RapidAPI)
+   - Initialize `FinfluencerTracker` class with `CronJobStats`
+
+2. **Channel Processing Phase**
+   - Fetch active channels from `finfluencer_channels` table
+   - Process each channel sequentially with 1-second delays
+   - For each channel:
+     - Get new videos since `last_checked_at`
+     - Filter out live/premiere videos and videos < 60 seconds
+     - Process each video individually
+
+3. **Video Processing Phase**
+   - Check if video already exists in database
+   - Skip if already processed (increment `skipped_videos`)
+   - Retrieve transcript using RapidAPI or fallback to YouTube Data API
+   - **Validate transcript quality**:
+     - Minimum 50 characters
+     - Contains line breaks or sufficient word count
+     - Must look like real captions/subtitles
+
+4. **AI Analysis Phase**
+   - Send validated transcript to OpenRouter for analysis
+   - Parse structured JSON response
+   - Extract predictions, sentiment, target prices, horizons
+
+5. **Database Storage Phase**
+   - Insert prediction record to `finfluencer_predictions`
+   - Update channel `last_checked_at` timestamp
+   - Increment success counters
+
+6. **Idle-Time Retry Phase**
+   - **After main processing completes**, trigger retry service
+   - Process failed predictions in batches of 10
+   - Apply 5-second delays between batches
+   - Track retry statistics and logging
+
+### Error Handling Strategy
+
+- **Transcript Validation Failures**: Create fallback record with "No subtitles/captions available"
+- **AI Analysis Failures**: Create basic record with error message, continue processing
+- **Database Errors**: Log error but continue to next video
+- **Retry Service Failures**: Log error but don't stop main application
 
 ## 🔄 Retry Service
 
@@ -317,23 +391,31 @@ The service provides comprehensive statistics:
 
 ## 📊 Monitoring & Logging
 
-The service provides comprehensive logging:
+The service provides comprehensive logging with `CronJobStats`:
 
-- 🚀 Startup and connection tests
-- 📺 Channel processing status
-- 📹 Video fetching and analysis
-- 🔄 **Retry service statistics and batch processing**
-- ✅ Success/failure rates
-- 📊 Final statistics summary
-- 🧠 Memory usage tracking
-- ⚠️ Error details and stack traces
+- 🚀 **Startup**: Configuration validation and connection tests
+- 📺 **Channel Processing**: Status per channel with video counts
+- 📹 **Video Processing**: Individual video status and transcript validation
+- 🔄 **Retry Service**: Statistics and batch processing details
+- ✅ **Success/Failure Rates**: Detailed counts and percentages
+- 📊 **Final Statistics**: Complete execution summary with memory usage
+- ⚠️ **Error Details**: Stack traces and context information
 
 ### Log Levels
 
-- `info`: General progress information
-- `warn`: Non-fatal issues, retry failures
-- `error`: Fatal errors, complete retry failures
-- `debug`: Detailed debugging info
+- `info`: General progress information and statistics
+- `warn`: Non-fatal issues, retry failures, transcript validation warnings
+- `error`: Fatal errors, complete retry failures, critical failures
+- `debug`: Detailed debugging info for troubleshooting
+
+### Statistics Tracking
+
+The application tracks comprehensive statistics:
+- Total/Processed/Skipped video counts
+- Videos with/without captions
+- Error counts and success rates
+- Memory usage and execution duration
+- Retry service statistics
 
 ## 🔧 Configuration Options
 
@@ -368,6 +450,7 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
 - **Container Optimized**: Small Alpine Linux base image
 - **Adaptive Polling**: RapidAPI polling adapts to processing time
 - **Idle-Time Processing**: Uses remaining processing time for recovery operations
+- **Smart Validation**: Heuristic checks prevent unnecessary AI processing
 
 ## 🐛 Troubleshooting
 
@@ -394,6 +477,7 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
 5. **Transcript Not Available**
    - Some videos don't have transcripts
    - Service logs warnings but continues processing
+   - Check if video has closed captions enabled
 
 6. **High Retry Rates**
    - Check RapidAPI connectivity
@@ -405,12 +489,26 @@ Easily switch AI models by changing `OPENROUTER_MODEL`:
    - Verify `retry_count < MAX_RETRY_ATTEMPTS`
    - Ensure records exist in database
 
+8. **Database Schema Issues**
+   - Verify all required columns exist in both tables
+   - Check column types match the defined schema
+   - Ensure proper indexing on frequently queried columns
+
 ### Debug Mode
 
 Set `LOG_LEVEL=debug` for detailed logging:
 
 ```bash
 LOG_LEVEL=debug npm run dev
+```
+
+### Health Check
+
+The service includes comprehensive health checks:
+
+```typescript
+const health = await supabaseService.healthCheck();
+// Returns database status, table existence, and basic statistics
 ```
 
 ### Retry Service Debug Commands
@@ -423,16 +521,20 @@ const stats = await retryService.getRetryStatistics();
 await retryService.processFailedPredictions();
 ```
 
+### Database Query Debugging
+
+Monitor database operations through the health check endpoint and health check service methods.
+
 ## 📝 Development
 
 ### Adding New Features
 
-1. Add types in `src/types.ts`
-2. Implement logic in appropriate service file
-3. Add error handling in `src/errors.ts`
-4. Update configuration in `src/config.ts`
-5. Add logging with the logger utility
-6. **Update retry service logic if needed in `src/retryService.ts`**
+1. **Add Types**: Update `src/types.ts` with new interfaces
+2. **Implement Logic**: Create new service files in appropriate modules
+3. **Error Handling**: Add error classes in `src/errors.ts`
+4. **Update Configuration**: Modify `src/config.ts` for new settings
+5. **Add Logging**: Use the logger utility throughout
+6. **Update Retry Service**: Modify `src/retryService.ts` if needed
 
 ### Testing
 
@@ -445,9 +547,9 @@ npm start
 
 - TypeScript strict mode enabled
 - Comprehensive error handling
-- Detailed logging
+- Detailed logging with context
 - Modular architecture
-- **Retry service integration testing**
+- Integration testing for retry service
 
 ### Version Management
 
@@ -496,7 +598,9 @@ For issues and questions:
 - 🔧 **Configuration Updates**: New retry-related environment variables
 - 📝 **Documentation**: Comprehensive retry service documentation
 - 🎯 **Performance Improvements**: Idle-time processing optimization
-- 🐛 **Bug Fixes**: Various stability improvements
+- 🛡️ **Transcript Validation**: Heuristic validation to ensure real captions
+- 📈 **Statistics Tracking**: Comprehensive CronJobStats with memory monitoring
+- 🔄 **Database Health Checks**: New health check service methods
 
 ---
 
