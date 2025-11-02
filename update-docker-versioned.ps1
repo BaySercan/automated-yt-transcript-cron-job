@@ -200,12 +200,12 @@ function Update-VersionTs {
         $content = Get-Content $VERSION_FILE -Raw
         
         # Update version.ts using correct regex patterns for the object structure
-        $content = $content -replace "^version:\s*'[^']*'", "version: '$NewVersion'"
-        $content = $content -replace "^major:\s*[0-9]*", "major: $major"
-        $content = $content -replace "^minor:\s*[0-9]*", "minor: $minor"
-        $content = $content -replace "^patch:\s*[0-9]*", "patch: $patch"
-        $content = $content -replace "^buildDate:\s*new Date\(\)\.toISOString\(\)", "buildDate: '$buildDate'"
-        $content = $content -replace "^buildNumber:\s*Math\.floor\(Date\.now\(\)\s*/\s*1000\)", "buildNumber: $buildNumber"
+        $content = $content -replace "version:\s*'[^']*'", "version: '$NewVersion'"
+        $content = $content -replace "major:\s*[0-9]*", "major: $major"
+        $content = $content -replace "minor:\s*[0-9]*", "minor: $minor"
+        $content = $content -replace "patch:\s*[0-9]*", "patch: $patch"
+        $content = $content -replace "buildDate:\s*new Date\(\)\.toISOString\(\)", "buildDate: '$buildDate'"
+        $content = $content -replace "buildNumber:\s*Math\.floor\(Date\.now\(\)\s*/\s*1000\)", "buildNumber: $buildNumber"
 
         Set-Content -Path $VERSION_FILE -Value $content -NoNewline
         Write-LogSuccess "Updated src/version.ts"
