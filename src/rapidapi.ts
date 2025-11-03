@@ -439,8 +439,25 @@ export class RapidAPIService {
 
       const data = await response.json() as any;
       
-      // Enhanced validation for new response format
-      if (!data.success && !data.isProcessed && !data.status) {
+      // 🔧 CRITICAL FIX: Enhanced validation for failed status detection
+      // First, check if this is a failed response with status: "failed"
+      if (data.status === 'failed') {
+        logger.warn(`🚨 DETECTED FAILED STATUS in response for process ${processId}:`, {
+          status: data.status,
+          message: data.message,
+          progress: data.progress,
+          fullResponse: data
+        });
+        
+        // Record failed metrics
+        RateLimitMonitor.recordRequest('rapidapi-result', false, responseTime);
+        
+        // Return the failed result directly - this will cause polling to stop
+        return data as RapidAPIResult;
+      }
+      
+      // Enhanced validation: Check if response has any meaningful content
+      if (!data.success && !data.isProcessed && !data.status && !data.transcript && !data.message) {
         throw new TranscriptError('Invalid response from RapidAPI: missing required fields');
       }
 
