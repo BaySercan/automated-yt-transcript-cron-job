@@ -187,7 +187,7 @@ export class RapidAPIService {
         }
 
         // Check for processing failure using NEW format
-        if (result.success === false || (result.isProcessed === true && !result.transcript)) {
+        if (result.success === false || (result.isProcessed === true && !result.transcript) || result.status === 'failed') {
           const error = `RapidAPI processing failed: ${result.error || 'Unknown processing error'}`;
           logger.error(`❌ FAILED! ${error}`, { result });
           
@@ -234,7 +234,7 @@ export class RapidAPIService {
       // Apply rate limiting for transcript requests
       await this.transcriptRateLimiter.wait();
 
-      const url = `${config.rapidapiUrl}/transcript?skipAI=true&url=https://www.youtube.com/watch?v=${videoId}`;
+      const url = `${config.rapidapiUrl}/transcript?skipAI=false&url=https://www.youtube.com/watch?v=${videoId}`;
       
       const response = await fetch(url, {
         method: 'GET',
@@ -347,12 +347,13 @@ export class RapidAPIService {
           return result;
         }
         
-        // Check for processing failure - RapidAPI returns success: false when failed
-        if (result.success === false || (result.isProcessed === true && !result.transcript)) {
+        // Check for processing failure - RapidAPI returns success: false when failed OR status: "failed"
+        if (result.success === false || (result.isProcessed === true && !result.transcript) || result.status === 'failed') {
           logger.error(`❌ FAILED! RapidAPI processing failed for ${processId}`, { 
             success: result.success,
             isProcessed: result.isProcessed,
             hasTranscript: !!result.transcript,
+            status: result.status,
             fullResult: result 
           });
           
