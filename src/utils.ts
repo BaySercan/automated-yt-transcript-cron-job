@@ -217,7 +217,7 @@ export function setupGracefulShutdown(handler: () => Promise<void>): void {
   });
 }
 
-// Rate limiting helper
+// Basic RateLimiter
 export class RateLimiter {
   private lastRequest = 0;
   private minInterval: number;
@@ -236,6 +236,180 @@ export class RateLimiter {
     }
     
     this.lastRequest = Date.now();
+  }
+}
+
+// Enhanced RateLimiter with jitter and 429 handling
+export class EnhancedRateLimiter {
+  private lastRequest = 0;
+  private minInterval: number;
+  private readonly maxRetries = 5;
+  private readonly baseDelay = 2000;
+
+  constructor(requestsPerSecond: number) {
+    this.minInterval = 1000 / requestsPerSecond;
+  }
+
+  async wait(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequest;
+    
+    if (timeSinceLastRequest < this.minInterval) {
+      const waitTime = this.minInterval - timeSinceLastRequest;
+      // Add jitter (±25% of the wait time) to prevent thundering herd
+      const jitter = waitTime * 0.25 * (Math.random() - 0.5) * 2;
+      const finalWaitTime = Math.max(0, waitTime + jitter);
+      await new Promise(resolve => setTimeout(resolve, finalWaitTime));
+    }
+    
+    this.lastRequest = Date.now();
+  }
+
+  // Handle 429 errors with exponential backoff
+  async handle429Error(attempt: number = 0): Promise<void> {
+    if (attempt >= this.maxRetries) {
+      throw new Error(`Max 429 retry attempts (${this.maxRetries}) reached`);
+    }
+    
+    // Exponential backoff with jitter
+    const baseDelay = this.baseDelay * Math.pow(2, attempt);
+    const jitter = baseDelay * 0.5 * Math.random(); // 0-50% jitter
+    const delay = baseDelay + jitter;
+    
+    logger.warn(`429 Rate Limit hit, backing off for ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
+    await sleep(delay);
+  }
+}
+
+// Circuit Breaker for API protection
+export class CircuitBreaker {
+  private failureCount = 0;
+  private lastFailureTime = 0;
+  
+  constructor(
+    private readonly failureThreshold: number = 10,
+    private readonly resetTimeout: number = 60000
+  ) {}
+
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.isOpen()) {
+      throw new Error(`Circuit breaker is OPEN. Too many failures. Will reset at ${new Date(this.lastFailureTime + this.resetTimeout)}`);
+    }
+
+    try {
+      const result = await operation();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private isOpen(): boolean {
+    return this.failureCount >= this.failureThreshold && 
+           (Date.now() - this.lastFailureTime) < this.resetTimeout;
+  }
+
+  private onSuccess(): void {
+    this.failureCount = 0;
+  }
+
+  private onFailure(): void {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+    
+    if (this.failureCount >= this.failureThreshold) {
+      logger.error(`Circuit breaker threshold exceeded! Failure count: ${this.failureCount}`);
+    }
+  }
+
+  getStatus(): { isOpen: boolean; failureCount: number; lastFailureTime: number } {
+    return {
+      isOpen: this.isOpen(),
+      failureCount: this.failureCount,
+      lastFailureTime: this.lastFailureTime
+    };
+  }
+}
+
+// Rate limit monitoring and metrics
+export class RateLimitMonitor {
+  private static stats = new Map<string, {
+    requests: number;
+    successes: number;
+    rateLimitErrors: number;
+    otherErrors: number;
+    avgResponseTime: number;
+    lastReset: number;
+  }>();
+
+  static recordRequest(endpoint: string, success: boolean, responseTime: number, isRateLimitError: boolean = false): void {
+    const stats = this.stats.get(endpoint) || {
+      requests: 0,
+      successes: 0,
+      rateLimitErrors: 0,
+      otherErrors: 0,
+      avgResponseTime: 0,
+      lastReset: Date.now()
+    };
+
+    stats.requests++;
+    stats.avgResponseTime = ((stats.avgResponseTime * (stats.requests - 1)) + responseTime) / stats.requests;
+
+    if (success) {
+      stats.successes++;
+    } else if (isRateLimitError) {
+      stats.rateLimitErrors++;
+    } else {
+      stats.otherErrors++;
+    }
+
+    this.stats.set(endpoint, stats);
+
+    // Log rate limit violations
+    if (isRateLimitError) {
+      logger.warn(`Rate limit violation for ${endpoint}`, {
+        totalRequests: stats.requests,
+        rateLimitErrors: stats.rateLimitErrors,
+        errorRate: ((stats.rateLimitErrors / stats.requests) * 100).toFixed(2) + '%'
+      });
+    }
+  }
+
+  static getStats(endpoint?: string): any {
+    if (endpoint) {
+      return this.stats.get(endpoint) || null;
+    }
+    
+    const allStats: { [key: string]: any } = {};
+    this.stats.forEach((stats, endpoint) => {
+      allStats[endpoint] = {
+        ...stats,
+        successRate: stats.requests > 0 ? ((stats.successes / stats.requests) * 100).toFixed(2) + '%' : '0%',
+        errorRate: stats.requests > 0 ? ((((stats.rateLimitErrors + stats.otherErrors) / stats.requests) * 100).toFixed(2) + '%') : '0%',
+        rateLimitErrorRate: stats.requests > 0 ? ((stats.rateLimitErrors / stats.requests) * 100).toFixed(2) + '%' : '0%'
+      };
+    });
+    
+    return allStats;
+  }
+
+  static reset(endpoint?: string): void {
+    if (endpoint) {
+      const stats = this.stats.get(endpoint);
+      if (stats) {
+        stats.requests = 0;
+        stats.successes = 0;
+        stats.rateLimitErrors = 0;
+        stats.otherErrors = 0;
+        stats.avgResponseTime = 0;
+        stats.lastReset = Date.now();
+        this.stats.set(endpoint, stats);
+      }
+    } else {
+      this.stats.clear();
+    }
   }
 }
 

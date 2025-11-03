@@ -1,7 +1,15 @@
 import { supabaseService } from './supabase';
 import { rapidapiService } from './rapidapi';
 import { aiAnalyzer } from './analyzer';
-import { logger, retryWithBackoff, isValidYouTubeVideoId } from './utils';
+import { 
+  logger, 
+  retryWithBackoff, 
+  isValidYouTubeVideoId,
+  EnhancedRateLimiter,
+  CircuitBreaker,
+  RateLimitMonitor,
+  sleep
+} from './utils';
 import { FinfluencerPrediction } from './types';
 
 export interface RetryRecord {
@@ -25,13 +33,26 @@ export interface RetryResult {
 
 export class RetryService {
   private readonly MAX_RETRY_ATTEMPTS = 3;
-  private readonly BATCH_SIZE = 10;
-  private readonly DELAY_BETWEEN_BATCHES = 5000; // 5 seconds
+  private readonly BATCH_SIZE = 5; // Reduced from 10 to 5
+  private readonly DELAY_BETWEEN_BATCHES = 12000; // Increased from 5s to 12s
+  private readonly SEQUENTIAL_DELAY = 3000; // 3 seconds between individual records
+  private readonly MAX_429_RETRIES = 3;
+  
+  // Enhanced rate limiting infrastructure
+  private readonly rateLimiter: EnhancedRateLimiter;
+  private readonly circuitBreaker: CircuitBreaker;
+
+  constructor() {
+    // Rate limit to respect RapidAPI limits - more conservative
+    this.rateLimiter = new EnhancedRateLimiter(0.5); // 1 request per 2 seconds
+    // Circuit breaker with threshold for failures
+    this.circuitBreaker = new CircuitBreaker(5, 60000); // 5 failures, 1 minute reset
+  }
 
   // Main method to process all failed predictions
   async processFailedPredictions(): Promise<void> {
     try {
-      logger.info('🔄 Starting retry process for failed predictions');
+      logger.info('🔄 Starting retry process for failed predictions with enhanced rate limiting');
 
       // Get records that need retry (newer first)
       const recordsToRetry = await this.getRecordsNeedingRetry();
@@ -42,20 +63,30 @@ export class RetryService {
       }
 
       logger.info(`📋 Found ${recordsToRetry.length} records to retry`);
+      logger.info(`⚙️ Batch size: ${this.BATCH_SIZE}, Delay between batches: ${this.DELAY_BETWEEN_BATCHES/1000}s`);
 
-      // Process in batches to avoid overwhelming the system
+      // Process in smaller batches with enhanced rate limiting
       for (let i = 0; i < recordsToRetry.length; i += this.BATCH_SIZE) {
         const batch = recordsToRetry.slice(i, i + this.BATCH_SIZE);
-        await this.processBatch(batch);
+        await this.processBatchWithRateLimit(batch);
         
-        // Delay between batches to respect rate limits
+        // Enhanced delay between batches with jitter
         if (i + this.BATCH_SIZE < recordsToRetry.length) {
-          logger.debug(`⏳ Waiting ${this.DELAY_BETWEEN_BATCHES/1000}s before next batch...`);
-          await new Promise(resolve => setTimeout(resolve, this.DELAY_BETWEEN_BATCHES));
+          const jitter = Math.random() * 2000; // Add up to 2s jitter
+          const finalDelay = this.DELAY_BETWEEN_BATCHES + jitter;
+          
+          logger.debug(`⏳ Waiting ${(finalDelay/1000).toFixed(1)}s before next batch...`);
+          await new Promise(resolve => setTimeout(resolve, finalDelay));
         }
       }
 
-      logger.info('✅ Retry process completed');
+      // Log final statistics
+      const stats = RateLimitMonitor.getStats('retry-service');
+      logger.info('✅ Retry process completed', {
+        totalRecordsProcessed: recordsToRetry.length,
+        rateLimitStats: stats
+      });
+      
     } catch (error) {
       logger.error('❌ Retry process failed', { error });
       throw error;
@@ -80,7 +111,7 @@ export class RetryService {
         .eq('predictions', '[]')
         .or(`retry_count.is.null,retry_count.lt.${this.MAX_RETRY_ATTEMPTS}`)
         .order('post_date', { ascending: false }) // Newer first
-        .limit(50); // Process maximum 50 records per run
+        .limit(30); // Reduced from 50 to 30 per run for better rate limiting
 
       if (error) {
         throw new Error(`Failed to fetch retry candidates: ${error.message}`);
@@ -102,36 +133,116 @@ export class RetryService {
     }
   }
 
-  // Process a batch of records
-  private async processBatch(records: RetryRecord[]): Promise<void> {
-    logger.info(`🔄 Processing batch of ${records.length} records`);
+  // Process a batch with enhanced rate limiting and circuit breaker
+  private async processBatchWithRateLimit(records: RetryRecord[]): Promise<void> {
+    logger.info(`🔄 Processing batch of ${records.length} records with rate limiting`);
 
-    const promises = records.map(record => this.processSingleRecord(record));
-    
-    const results = await Promise.allSettled(promises);
-    
-    // Log results
-    const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
-    const failed = results.filter(r => r.status === 'rejected' || !r.value.success).length;
-    
-    logger.info(`📊 Batch results: ${successful} successful, ${failed} failed`);
-
-    // Log individual failures for debugging
-    results.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        logger.error(`Record ${records[index].video_id} failed completely`, { error: result.reason });
-      } else if (!result.value.success) {
-        logger.warn(`Record ${records[index].video_id} failed: ${result.value.error}`);
+    // Use circuit breaker to protect against repeated failures
+    await this.circuitBreaker.execute(async () => {
+      // Process records sequentially within batch to reduce load
+      const results: RetryResult[] = [];
+      
+      for (let i = 0; i < records.length; i++) {
+        const record = records[i];
+        
+        try {
+          logger.debug(`Processing record ${i + 1}/${records.length}: ${record.video_id}`);
+          
+          // Apply rate limiting before each record
+          await this.rateLimiter.wait();
+          
+          const result = await this.processSingleRecordWith429Handling(record);
+          results.push(result);
+          
+          // Add small delay between individual records for better rate limiting
+          if (i < records.length - 1) {
+            await sleep(this.SEQUENTIAL_DELAY);
+          }
+          
+        } catch (error) {
+          logger.error(`Failed to process record ${record.video_id}`, { error });
+          results.push({
+            success: false,
+            transcriptFound: false,
+            predictionsFound: 0,
+            error: (error as Error).message
+          });
+        }
+      }
+      
+      // Log batch results with rate limit statistics
+      const successful = results.filter(r => r.success).length;
+      const failed = results.filter(r => !r.success).length;
+      const rateLimitErrors = results.filter(r => r.error?.includes('429') || r.error?.includes('rate limit')).length;
+      
+      logger.info(`📊 Batch completed: ${successful} successful, ${failed} failed, ${rateLimitErrors} rate-limited`);
+      
+      // Record batch statistics
+      RateLimitMonitor.recordRequest('retry-batch', successful > 0, Date.now(), rateLimitErrors > 0);
+      
+      if (rateLimitErrors > 0) {
+        logger.warn(`⚠️ ${rateLimitErrors} rate limit errors in batch - consider reducing batch size`);
       }
     });
+  }
+
+  // Process a single record with 429-specific error handling
+  private async processSingleRecordWith429Handling(record: RetryRecord): Promise<RetryResult> {
+    const retryNumber = record.retry_count + 1;
+    let attempt = 0;
+    
+    while (attempt <= this.MAX_429_RETRIES) {
+      try {
+        return await this.processSingleRecord(record);
+      } catch (error) {
+        const errorMessage = (error as Error).message;
+        const isRateLimitError = errorMessage.includes('429') || 
+                                errorMessage.includes('rate limit') ||
+                                errorMessage.includes('too many requests');
+        
+        if (isRateLimitError && attempt < this.MAX_429_RETRIES) {
+          attempt++;
+          logger.warn(`⚠️ Rate limit hit for ${record.video_id}, retrying with backoff (attempt ${attempt}/${this.MAX_429_RETRIES})`);
+          await this.rateLimiter.handle429Error(attempt);
+          continue;
+        }
+        
+        // Non-rate-limit error or max retries reached
+        await this.updateRetryStatus(record.id, retryNumber, errorMessage);
+        logger.error(`❌ Retry failed for video ${record.video_id}`, { 
+          error, 
+          attempt: attempt + 1,
+          isRateLimitError 
+        });
+        
+        return {
+          success: false,
+          transcriptFound: false,
+          predictionsFound: 0,
+          error: errorMessage
+        };
+      }
+    }
+    
+    // Should not reach here, but just in case
+    return {
+      success: false,
+      transcriptFound: false,
+      predictionsFound: 0,
+      error: 'Max 429 retries exceeded'
+    };
   }
 
   // Process a single record for retry
   private async processSingleRecord(record: RetryRecord): Promise<RetryResult> {
     const retryNumber = record.retry_count + 1;
+    const startTime = Date.now();
     
     try {
       logger.info(`🔄 Retrying record ${record.video_id} (attempt ${retryNumber}/${this.MAX_RETRY_ATTEMPTS})`);
+
+      // Apply rate limiting before API calls
+      await this.rateLimiter.wait();
 
       // Get video info from RapidAPI /info endpoint
       const videoInfo = await rapidapiService.getVideoInfo(record.video_id);
@@ -186,11 +297,15 @@ export class RetryService {
 
       logger.info(`✅ Successfully updated predictions for video ${record.video_id}`, {
         predictionsFound: analysis.predictions.length,
-        modifications: analysis.ai_modifications.length
+        modifications: analysis.ai_modifications.length,
+        processingTime: Date.now() - startTime
       });
 
       // Mark as successful
       await this.markRetrySuccess(record.id);
+
+      // Record successful metrics
+      RateLimitMonitor.recordRequest('retry-record', true, Date.now() - startTime);
 
       return {
         success: true,
@@ -202,7 +317,18 @@ export class RetryService {
       const errorMessage = (error as Error).message;
       await this.updateRetryStatus(record.id, retryNumber, errorMessage);
       
-      logger.error(`❌ Retry failed for video ${record.video_id}`, { error });
+      const isRateLimitError = errorMessage.includes('429') || 
+                              errorMessage.includes('rate limit') ||
+                              errorMessage.includes('too many requests');
+      
+      logger.error(`❌ Retry failed for video ${record.video_id}`, { 
+        error,
+        processingTime: Date.now() - startTime,
+        isRateLimitError
+      });
+      
+      // Record failed metrics
+      RateLimitMonitor.recordRequest('retry-record', false, Date.now() - startTime, isRateLimitError);
       
       return {
         success: false,
@@ -316,11 +442,12 @@ export class RetryService {
     }
   }
 
-  // Get retry statistics
+  // Get retry statistics including rate limit metrics
   async getRetryStatistics(): Promise<{
     totalEligible: number;
     maxAttemptsReached: number;
-    lastRunResults?: any;
+    rateLimitStats?: any;
+    circuitBreakerStatus?: any;
   }> {
     try {
       const { data, error } = await supabaseService.getClient()
@@ -337,14 +464,30 @@ export class RetryService {
 
       return {
         totalEligible,
-        maxAttemptsReached
+        maxAttemptsReached,
+        rateLimitStats: RateLimitMonitor.getStats('retry-service'),
+        circuitBreakerStatus: this.circuitBreaker.getStatus()
       };
     } catch (error) {
       logger.error('Error getting retry statistics', { error });
       return {
         totalEligible: 0,
-        maxAttemptsReached: 0
+        maxAttemptsReached: 0,
+        rateLimitStats: null,
+        circuitBreakerStatus: this.circuitBreaker.getStatus()
       };
+    }
+  }
+
+  // Reset rate limiting metrics (for testing or manual reset)
+  async resetMetrics(): Promise<void> {
+    try {
+      RateLimitMonitor.reset('retry-service');
+      RateLimitMonitor.reset('retry-batch');
+      RateLimitMonitor.reset('retry-record');
+      logger.info('📊 Rate limiting metrics reset');
+    } catch (error) {
+      logger.error('Error resetting metrics', { error });
     }
   }
 }

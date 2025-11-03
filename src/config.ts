@@ -48,6 +48,39 @@ export const config = {
   rapidapiMaxRetries: 5,
   rapidapiPollInterval: 5000, // ms
   rapidapiMaxPollTime: 300000, // 5 minutes
+  
+  // Enhanced Rate Limiting Configuration
+  rateLimiting: {
+    // Retry Service Settings
+    retryBatchSize: parseInt(process.env.RETRY_BATCH_SIZE) || 5, // Reduced from 10 to 5
+    retryBatchDelay: parseInt(process.env.RETRY_BATCH_DELAY) || 12000, // Increased to 12s
+    retrySequentialDelay: parseInt(process.env.RETRY_SEQUENTIAL_DELAY) || 3000, // 3s between records
+    max429Retries: parseInt(process.env.MAX_429_RETRIES) || 3,
+    
+    // RapidAPI Endpoint Rate Limits (requests per second)
+    rapidapiInfoRps: parseFloat(process.env.RAPIDAPI_INFO_RPS) || 0.7, // 1 request per ~1.4s
+    rapidapiTranscriptRps: parseFloat(process.env.RAPIDAPI_TRANSCRIPT_RPS) || 0.5, // 1 request per 2s
+    rapidapiResultRps: parseFloat(process.env.RAPIDAPI_RESULT_RPS) || 1.0, // 1 request per second
+    
+    // Circuit Breaker Settings
+    circuitBreakerFailureThreshold: parseInt(process.env.CIRCUIT_BREAKER_THRESHOLD) || 8,
+    circuitBreakerResetTimeout: parseInt(process.env.CIRCUIT_BREAKER_RESET_TIMEOUT) || 120000, // 2 minutes
+    
+    // 429 Error Handling
+    maxRateLimitRetries: parseInt(process.env.MAX_RATE_LIMIT_RETRIES) || 5,
+    baseRateLimitDelay: parseInt(process.env.BASE_RATE_LIMIT_DELAY) || 2000, // 2 seconds
+    rateLimitJitter: parseFloat(process.env.RATE_LIMIT_JITTER) || 0.5, // 50% jitter
+    
+    // Jitter Configuration
+    jitterPercentage: parseFloat(process.env.JITTER_PERCENTAGE) || 0.25, // 25% jitter
+  },
+  
+  // Rate Limit Monitoring
+  monitoring: {
+    enableMetrics: process.env.ENABLE_RATE_LIMIT_METRICS === 'true' || true,
+    logLevelDetailed: process.env.LOG_LEVEL_DETAILED === 'true' || false,
+    alertOnRateLimit: process.env.ALERT_ON_RATE_LIMIT === 'true' || true,
+  }
 };
 
 // Validation
@@ -64,6 +97,16 @@ export function validateConfig(): void {
   console.log('- supabaseServiceKey:', config.supabaseServiceKey ? `${config.supabaseServiceKey.length} chars` : 'MISSING');
   console.log('- openrouterApiKey:', config.openrouterApiKey ? `${config.openrouterApiKey.length} chars` : 'MISSING');
   console.log('- openrouterModel:', config.openrouterModel);
+
+  console.log('Rate Limiting Configuration:');
+  console.log('- Retry Batch Size:', config.rateLimiting.retryBatchSize);
+  console.log('- Retry Batch Delay:', config.rateLimiting.retryBatchDelay + 'ms');
+  console.log('- Sequential Delay:', config.rateLimiting.retrySequentialDelay + 'ms');
+  console.log('- Info RPS:', config.rateLimiting.rapidapiInfoRps);
+  console.log('- Transcript RPS:', config.rateLimiting.rapidapiTranscriptRps);
+  console.log('- Result RPS:', config.rateLimiting.rapidapiResultRps);
+  console.log('- Circuit Breaker Threshold:', config.rateLimiting.circuitBreakerFailureThreshold);
+  console.log('- Circuit Breaker Reset Timeout:', config.rateLimiting.circuitBreakerResetTimeout + 'ms');
 
   const requiredVars = [
     'youtubeApiKey',
@@ -99,6 +142,27 @@ export function validateConfig(): void {
   // Validate OpenRouter API key
   if (config.openrouterApiKey.length < 20) {
     throw new Error('OpenRouter API key appears to be invalid (too short)');
+  }
+  
+  // Validate rate limiting values
+  if (config.rateLimiting.retryBatchSize <= 0 || config.rateLimiting.retryBatchSize > 20) {
+    throw new Error('RETRY_BATCH_SIZE must be between 1 and 20');
+  }
+  
+  if (config.rateLimiting.retryBatchDelay < 1000 || config.rateLimiting.retryBatchDelay > 60000) {
+    throw new Error('RETRY_BATCH_DELAY must be between 1000ms and 60000ms');
+  }
+  
+  if (config.rateLimiting.rapidapiInfoRps <= 0 || config.rateLimiting.rapidapiInfoRps > 5) {
+    throw new Error('RAPIDAPI_INFO_RPS must be between 0.1 and 5');
+  }
+  
+  if (config.rateLimiting.rapidapiTranscriptRps <= 0 || config.rateLimiting.rapidapiTranscriptRps > 5) {
+    throw new Error('RAPIDAPI_TRANSCRIPT_RPS must be between 0.1 and 5');
+  }
+  
+  if (config.rateLimiting.rapidapiResultRps <= 0 || config.rateLimiting.rapidapiResultRps > 5) {
+    throw new Error('RAPIDAPI_RESULT_RPS must be between 0.1 and 5');
   }
   
   console.log('✅ Configuration validation successful!');
