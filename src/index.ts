@@ -32,7 +32,7 @@ class FinfluencerTracker {
   async run(): Promise<void> {
     try {
       logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
-        version: '1.2.0',
+        version: '1.2.1',
         environment: config.timezone,
         model: config.openrouterModel
       });
@@ -349,7 +349,7 @@ class FinfluencerTracker {
         return;
       }
 
-      // Analyze with AI (only when we have valid captions) - SMARTER STATUS LOGIC
+      // Analyze with AI (only when we have valid captions)
       let analysis: any;
       let analysisSuccess = false;
       
@@ -362,29 +362,33 @@ class FinfluencerTracker {
           publishedAt: video.publishedAt
         });
         
-        // Check if analysis returned valid results
-        if (analysis && 
-            analysis.predictions && 
-            Array.isArray(analysis.predictions) &&
-            (analysis.predictions.length > 0 || 
-             (analysis.transcript_summary && 
-              !analysis.transcript_summary.includes('failed') &&
-              !analysis.transcript_summary.includes('error')))) {
+        // Check if analysis returned valid results:
+        // - predictions array with at least one item, OR
+        // - a non-error transcript_summary.
+        if (
+          analysis &&
+          Array.isArray(analysis.predictions) &&
+          (
+            analysis.predictions.length > 0 ||
+            (
+              typeof analysis.transcript_summary === 'string' &&
+              analysis.transcript_summary.trim().length > 0 &&
+              !analysis.transcript_summary.toLowerCase().includes('failed') &&
+              !analysis.transcript_summary.toLowerCase().includes('error')
+            )
+          )
+        ) {
           analysisSuccess = true;
           logger.info(`✅ AI analysis successful for video ${video.videoId}`, {
             predictionsFound: analysis.predictions.length,
-            hasValidSummary: !!(analysis.transcript_summary && 
-              !analysis.transcript_summary.includes('failed') &&
-              !analysis.transcript_summary.includes('error'))
+            hasValidSummary: !!analysis.transcript_summary
           });
         } else {
           logger.warn(`⚠️ AI analysis returned invalid/empty results for video ${video.videoId}`, {
             hasAnalysis: !!analysis,
             predictionsType: typeof analysis?.predictions,
             predictionsLength: Array.isArray(analysis?.predictions) ? analysis.predictions.length : 'not_array',
-            summaryValid: !!(analysis?.transcript_summary && 
-              !analysis.transcript_summary.includes('failed') &&
-              !analysis.transcript_summary.includes('error'))
+            summary: analysis?.transcript_summary
           });
         }
       } catch (analysisError) {
@@ -395,7 +399,9 @@ class FinfluencerTracker {
         analysisSuccess = false;
       }
 
-      // Determine subject outcome based on analysis success
+      // Determine subject outcome based on analysis success:
+      // - "analyzed" when we have a valid AI result (even if predictions are empty),
+      // - "pending" only when AI analysis failed/invalid and should be retried.
       const subjectOutcome = analysisSuccess ? 'analyzed' : 'pending';
       const shouldRetry = !analysisSuccess;
 
