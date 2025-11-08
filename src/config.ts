@@ -21,6 +21,11 @@ export const config = {
   rapidapiKey: process.env.RAPIDAPI_KEY || '',
   rapidapiUrl: process.env.RAPIDAPI_URL || 'https://youtube-multi-api.p.rapidapi.com',
   
+  // Supadata
+  supadataApiKey: process.env.SUPADATA_API_KEY || '',
+  supadataUrl: process.env.SUPADATA_URL || 'https://api.supadata.ai/v1',
+  rapidapiSupadataUrl: process.env.RAPIDAPI_SUPADATA_URL || '',
+  
   // Application
   startDate: process.env.START_DATE || '2025-01-01',
   timezone: process.env.TZ || 'Europe/Istanbul',
@@ -49,6 +54,12 @@ export const config = {
   rapidapiPollInterval: 5000, // ms
   rapidapiMaxPollTime: 300000, // 5 minutes
   
+  // Supadata settings
+  supadataMaxRetries: 3,
+  supadataPollInterval: 5000, // ms
+  supadataMaxPollTime: 1500000, // 25 minutes (same as RapidAPI)
+  supadataCreditsThreshold: 20, // Switch to RapidAPI version when main credits < 20
+  
   // Enhanced Rate Limiting Configuration
   rateLimiting: {
     // Retry Service Settings
@@ -61,6 +72,10 @@ export const config = {
     rapidapiInfoRps: parseFloat(process.env.RAPIDAPI_INFO_RPS) || 0.7, // 1 request per ~1.4s
     rapidapiTranscriptRps: parseFloat(process.env.RAPIDAPI_TRANSCRIPT_RPS) || 0.5, // 1 request per 2s
     rapidapiResultRps: parseFloat(process.env.RAPIDAPI_RESULT_RPS) || 1.0, // 1 request per second
+    
+    // Supadata Rate Limits (requests per second)
+    supadataTranscriptRps: parseFloat(process.env.SUPADATA_TRANSCRIPT_RPS) || 0.3, // 1 request per ~3.3s (conservative for credit management)
+    supadataResultRps: parseFloat(process.env.SUPADATA_RESULT_RPS) || 0.5, // 1 request per 2s
     
     // Circuit Breaker Settings
     circuitBreakerFailureThreshold: parseInt(process.env.CIRCUIT_BREAKER_THRESHOLD) || 8,
@@ -80,6 +95,14 @@ export const config = {
     enableMetrics: process.env.ENABLE_RATE_LIMIT_METRICS === 'true' || true,
     logLevelDetailed: process.env.LOG_LEVEL_DETAILED === 'true' || false,
     alertOnRateLimit: process.env.ALERT_ON_RATE_LIMIT === 'true' || true,
+  },
+  
+  // Credit Management
+  credits: {
+    trackUsage: process.env.TRACK_CREDITS === 'true' || true,
+    logUsage: process.env.LOG_CREDIT_USAGE === 'true' || true,
+    warnThreshold: parseInt(process.env.CREDIT_WARN_THRESHOLD) || 20,
+    switchPlatform: process.env.SWITCH_PLATFORM_ON_LOW_CREDITS === 'true' || true,
   }
 };
 
@@ -90,12 +113,14 @@ export function validateConfig(): void {
   console.log('- SUPABASE_URL:', process.env.SUPABASE_URL ? 'PRESENT' : 'MISSING');
   console.log('- SUPABASE_SERVICE_KEY:', process.env.SUPABASE_SERVICE_KEY ? 'PRESENT' : 'MISSING');
   console.log('- OPENROUTER_API_KEY:', process.env.OPENROUTER_API_KEY ? 'PRESENT' : 'MISSING');
+  console.log('- SUPADATA_API_KEY:', process.env.SUPADATA_API_KEY ? 'PRESENT' : 'MISSING');
   
   console.log('Config values:');
   console.log('- youtubeApiKey:', config.youtubeApiKey ? `${config.youtubeApiKey.length} chars` : 'MISSING');
   console.log('- supabaseUrl:', config.supabaseUrl ? `${config.supabaseUrl.length} chars` : 'MISSING');
   console.log('- supabaseServiceKey:', config.supabaseServiceKey ? `${config.supabaseServiceKey.length} chars` : 'MISSING');
   console.log('- openrouterApiKey:', config.openrouterApiKey ? `${config.openrouterApiKey.length} chars` : 'MISSING');
+  console.log('- supadataApiKey:', config.supadataApiKey ? `${config.supadataApiKey.length} chars` : 'MISSING');
   console.log('- openrouterModel:', config.openrouterModel);
 
   console.log('Rate Limiting Configuration:');
@@ -105,8 +130,11 @@ export function validateConfig(): void {
   console.log('- Info RPS:', config.rateLimiting.rapidapiInfoRps);
   console.log('- Transcript RPS:', config.rateLimiting.rapidapiTranscriptRps);
   console.log('- Result RPS:', config.rateLimiting.rapidapiResultRps);
+  console.log('- Supadata Transcript RPS:', config.rateLimiting.supadataTranscriptRps);
+  console.log('- Supadata Result RPS:', config.rateLimiting.supadataResultRps);
   console.log('- Circuit Breaker Threshold:', config.rateLimiting.circuitBreakerFailureThreshold);
   console.log('- Circuit Breaker Reset Timeout:', config.rateLimiting.circuitBreakerResetTimeout + 'ms');
+  console.log('- Supadata Credits Threshold:', config.supadataCreditsThreshold);
 
   const requiredVars = [
     'youtubeApiKey',

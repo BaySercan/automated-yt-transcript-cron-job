@@ -1,6 +1,6 @@
 import { supabaseService } from './supabase';
-import { rapidapiService } from './rapidapi';
-import { aiAnalyzer } from './analyzer';
+import { youtubeService } from './youtube';
+import { globalAIAnalyzer } from './enhancedAnalyzer';
 import { 
   logger, 
   retryWithBackoff, 
@@ -8,7 +8,8 @@ import {
   EnhancedRateLimiter,
   CircuitBreaker,
   RateLimitMonitor,
-  sleep
+  sleep,
+  detectLanguage
 } from './utils';
 import { FinfluencerPrediction } from './types';
 
@@ -22,20 +23,23 @@ export interface RetryRecord {
   retry_reason: string | null;
   default_language?: string;
   post_date: string;
+  raw_transcript?: string | null; // OPTIMIZATION: Include saved transcript
 }
 
 export interface RetryResult {
   success: boolean;
   transcriptFound: boolean;
+  transcriptSource: 'saved' | 'api' | 'none';
   predictionsFound: number;
   error?: string;
+  isOutOfSubject?: boolean;
 }
 
 export class RetryService {
   private readonly MAX_RETRY_ATTEMPTS = 3;
-  private readonly BATCH_SIZE = 5; // Reduced from 10 to 5
-  private readonly DELAY_BETWEEN_BATCHES = 12000; // Increased from 5s to 12s
-  private readonly SEQUENTIAL_DELAY = 3000; // 3 seconds between individual records
+  private readonly BATCH_SIZE = 3; // Reduced from 5 to 3 for better rate limiting
+  private readonly DELAY_BETWEEN_BATCHES = 15000; // Increased to 15s
+  private readonly SEQUENTIAL_DELAY = 5000; // 5 seconds between individual records
   private readonly MAX_429_RETRIES = 3;
   
   // Enhanced rate limiting infrastructure
@@ -43,18 +47,18 @@ export class RetryService {
   private readonly circuitBreaker: CircuitBreaker;
 
   constructor() {
-    // Rate limit to respect RapidAPI limits - more conservative
-    this.rateLimiter = new EnhancedRateLimiter(0.5); // 1 request per 2 seconds
+    // More conservative rate limiting for retry service
+    this.rateLimiter = new EnhancedRateLimiter(0.2); // 1 request per 5 seconds
     // Circuit breaker with threshold for failures
-    this.circuitBreaker = new CircuitBreaker(5, 60000); // 5 failures, 1 minute reset
+    this.circuitBreaker = new CircuitBreaker(3, 120000); // 3 failures, 2 minute reset
   }
 
   // Main method to process all failed predictions
   async processFailedPredictions(): Promise<void> {
     try {
-      logger.info('🔄 Starting retry process for failed predictions with enhanced rate limiting');
+      logger.info('🔄 Starting retry process for failed predictions with transcript reuse optimization');
 
-      // Get records that need retry (newer first)
+      // Get records that need retry (newer first, excluding out-of-subject videos)
       const recordsToRetry = await this.getRecordsNeedingRetry();
       
       if (recordsToRetry.length === 0) {
@@ -72,7 +76,7 @@ export class RetryService {
         
         // Enhanced delay between batches with jitter
         if (i + this.BATCH_SIZE < recordsToRetry.length) {
-          const jitter = Math.random() * 2000; // Add up to 2s jitter
+          const jitter = Math.random() * 3000; // Add up to 3s jitter
           const finalDelay = this.DELAY_BETWEEN_BATCHES + jitter;
           
           logger.debug(`⏳ Waiting ${(finalDelay/1000).toFixed(1)}s before next batch...`);
@@ -93,7 +97,7 @@ export class RetryService {
     }
   }
 
-  // Get records that need retry (newer first, with empty predictions)
+  // Get records that need retry (newer first, with empty predictions, excluding out-of-subject)
   private async getRecordsNeedingRetry(): Promise<RetryRecord[]> {
     try {
       const { data, error } = await supabaseService.getClient()
@@ -106,12 +110,17 @@ export class RetryService {
           retry_count,
           last_retry_at,
           retry_reason,
-          post_date
+          post_date,
+          subject_outcome,
+          raw_transcript,
+          transcript_summary
         `)
         .eq('predictions', '[]')
         .or(`retry_count.is.null,retry_count.lt.${this.MAX_RETRY_ATTEMPTS}`)
+        // KEY: Exclude videos marked as out_of_subject
+        .neq('subject_outcome', 'out_of_subject')
         .order('post_date', { ascending: false }) // Newer first
-        .limit(30); // Reduced from 50 to 30 per run for better rate limiting
+        .limit(15); // Reduced from 30 to 15 for better control
 
       if (error) {
         throw new Error(`Failed to fetch retry candidates: ${error.message}`);
@@ -125,7 +134,8 @@ export class RetryService {
         retry_count: record.retry_count || 0,
         last_retry_at: record.last_retry_at,
         retry_reason: record.retry_reason,
-        post_date: record.post_date
+        post_date: record.post_date,
+        raw_transcript: record.raw_transcript // OPTIMIZATION: Use saved transcript if available
       })) || [];
     } catch (error) {
       logger.error('Error fetching records for retry', { error });
@@ -164,6 +174,7 @@ export class RetryService {
           results.push({
             success: false,
             transcriptFound: false,
+            transcriptSource: 'none',
             predictionsFound: 0,
             error: (error as Error).message
           });
@@ -174,8 +185,12 @@ export class RetryService {
       const successful = results.filter(r => r.success).length;
       const failed = results.filter(r => !r.success).length;
       const rateLimitErrors = results.filter(r => r.error?.includes('429') || r.error?.includes('rate limit')).length;
+      const outOfSubject = results.filter(r => r.isOutOfSubject).length;
+      const savedTranscriptsUsed = results.filter(r => r.transcriptSource === 'saved').length;
+      const apiTranscriptsUsed = results.filter(r => r.transcriptSource === 'api').length;
       
-      logger.info(`📊 Batch completed: ${successful} successful, ${failed} failed, ${rateLimitErrors} rate-limited`);
+      logger.info(`📊 Batch completed: ${successful} successful, ${failed} failed, ${rateLimitErrors} rate-limited, ${outOfSubject} out-of-subject`);
+      logger.info(`💾 Transcript optimization: ${savedTranscriptsUsed} used saved transcripts, ${apiTranscriptsUsed} fetched new transcripts`);
       
       // Record batch statistics
       RateLimitMonitor.recordRequest('retry-batch', successful > 0, Date.now(), rateLimitErrors > 0);
@@ -218,6 +233,7 @@ export class RetryService {
         return {
           success: false,
           transcriptFound: false,
+          transcriptSource: 'none',
           predictionsFound: 0,
           error: errorMessage
         };
@@ -228,76 +244,130 @@ export class RetryService {
     return {
       success: false,
       transcriptFound: false,
+      transcriptSource: 'none',
       predictionsFound: 0,
       error: 'Max 429 retries exceeded'
     };
   }
 
-  // Process a single record for retry
+  // OPTIMIZED: Process a single record for retry using saved transcript first
   private async processSingleRecord(record: RetryRecord): Promise<RetryResult> {
     const retryNumber = record.retry_count + 1;
     const startTime = Date.now();
+    let transcriptSource: 'saved' | 'api' | 'none' = 'none';
     
     try {
       logger.info(`🔄 Retrying record ${record.video_id} (attempt ${retryNumber}/${this.MAX_RETRY_ATTEMPTS})`);
 
-      // Apply rate limiting before API calls
-      await this.rateLimiter.wait();
-
-      // Get video info from RapidAPI /info endpoint
-      const videoInfo = await rapidapiService.getVideoInfo(record.video_id);
+      // OPTIMIZATION: Check if we have a saved transcript first
+      let transcriptText: string | null = null;
       
-      if (!videoInfo || !videoInfo.automatic_captions) {
-        const error = 'No automatic captions available';
-        await this.updateRetryStatus(record.id, retryNumber, error);
-        logger.warn(`⚠️ ${error} for video ${record.video_id}`);
-        return { success: false, transcriptFound: false, predictionsFound: 0, error };
+      if (record.raw_transcript && record.raw_transcript.trim().length >= 50) {
+        // Use saved transcript - no API calls needed!
+        transcriptText = record.raw_transcript;
+        transcriptSource = 'saved';
+        logger.info(`💾 Using saved transcript for video ${record.video_id} (${transcriptText.length} characters)`);
+      } else {
+        // No saved transcript or it's too short, fetch from API
+        logger.info(`🔍 No saved transcript found, fetching from API for video ${record.video_id}`);
+        
+        // Apply rate limiting before API calls
+        await this.rateLimiter.wait();
+
+        const transcriptResult = await youtubeService.getVideoTranscript(record.video_id, record.default_language);
+        
+        if (!transcriptResult || !transcriptResult.transcript) {
+          const error = transcriptResult?.error || 'No transcript available';
+          await this.updateRetryStatus(record.id, retryNumber, error);
+          logger.warn(`⚠️ ${error} for video ${record.video_id}`);
+          return { success: false, transcriptFound: false, transcriptSource: 'none', predictionsFound: 0, error };
+        }
+
+        // Normalize transcript to string
+        transcriptText = typeof transcriptResult === 'string'
+          ? transcriptResult
+          : (transcriptResult?.transcript ?? '');
+
+        if (!transcriptText || transcriptText.trim().length < 50) {
+          const error = 'Transcript too short or empty';
+          await this.updateRetryStatus(record.id, retryNumber, error);
+          logger.warn(`⚠️ ${error} for video ${record.video_id}`);
+          return { success: false, transcriptFound: false, transcriptSource: 'none', predictionsFound: 0, error };
+        }
+
+        transcriptSource = 'api';
+        logger.info(`🌐 Fetched transcript from API for video ${record.video_id} (${transcriptText.length} characters)`);
       }
 
-      // Find appropriate caption URL based on language
-      const captionUrl = this.findCaptionUrl(videoInfo.automatic_captions, videoInfo.default_language);
-      
-      if (!captionUrl) {
-        const error = 'No suitable caption URL found';
-        await this.updateRetryStatus(record.id, retryNumber, error);
-        logger.warn(`⚠️ ${error} for video ${record.video_id}`);
-        return { success: false, transcriptFound: false, predictionsFound: 0, error };
-      }
+      // Now we have a valid transcript, proceed with analysis
+      logger.info(`📝 Processing transcript for video ${record.video_id} (source: ${transcriptSource})`);
 
-      logger.info(`✅ Found caption URL for video ${record.video_id}`);
-
-      // Fetch transcript from caption URL
-      const transcript = await this.fetchTranscriptFromCaptionUrl(captionUrl);
-      
-      if (!transcript || transcript.trim().length < 50) {
-        const error = 'Transcript too short or empty';
-        await this.updateRetryStatus(record.id, retryNumber, error);
-        logger.warn(`⚠️ ${error} for video ${record.video_id}`);
-        return { success: false, transcriptFound: false, predictionsFound: 0, error };
-      }
-
-      logger.info(`📝 Transcript found for video ${record.video_id} (${transcript.length} characters)`);
-
-      // Analyze transcript with AI
-      const analysis = await aiAnalyzer.analyzeTranscript(transcript, {
+      // Global analysis with language-agnostic approach
+      const analysis = await globalAIAnalyzer.analyzeTranscript(transcriptText, {
         videoId: record.video_id,
         title: record.video_title,
         channelId: record.channel_id,
         channelName: '', // We don't have this data here, but analyzer should handle it
-        publishedAt: record.post_date
+        publishedAt: record.post_date,
+        defaultLanguage: record.default_language
       });
+
+      // Enhanced validation for out-of-subject detection
+      const validationResult = this.enhancedOutOfSubjectValidation(analysis, transcriptText);
+      
+      if (validationResult.isOutOfSubject) {
+        // Mark as out of subject and never try again
+        logger.info(`📋 Enhanced analysis determined video ${record.video_id} is out of subject: ${validationResult.reason}`);
+        await supabaseService.markVideoAsOutOfSubject(record.id, transcriptText);
+        
+        return {
+          success: true, // Mark as successful to stop retrying
+          transcriptFound: true,
+          transcriptSource,
+          predictionsFound: 0,
+          isOutOfSubject: true
+        };
+      }
+
+      // Check if we got meaningful predictions
+      const hasValidPredictions = analysis.predictions && analysis.predictions.length > 0;
+
+      if (!hasValidPredictions) {
+        // This is key: Don't mark as out of subject just because no predictions were extracted
+        // Instead, update the record but mark it as analyzed so it won't be retried
+        logger.info(`📋 Financial content detected but no specific predictions for video ${record.video_id}, marking as analyzed`);
+        await supabaseService.updatePredictionWithRetry(record.id, {
+          transcript_summary: analysis.transcript_summary,
+          predictions: [], // Keep empty but mark as analyzed
+          ai_modifications: analysis.ai_modifications,
+          language: analysis.language,
+          raw_transcript: transcriptText, // Update/save the transcript we used
+          subject_outcome: 'analyzed'
+        });
+        
+        return {
+          success: true, // Mark as successful to stop retrying
+          transcriptFound: true,
+          transcriptSource,
+          predictionsFound: 0
+        };
+      }
 
       // Update the existing record with new results
       await supabaseService.updatePredictionWithRetry(record.id, {
         transcript_summary: analysis.transcript_summary,
         predictions: analysis.predictions,
         ai_modifications: analysis.ai_modifications,
-        language: analysis.language
+        language: analysis.language,
+        raw_transcript: transcriptText, // Update/save the transcript we used
+        subject_outcome: 'analyzed'
       });
 
       logger.info(`✅ Successfully updated predictions for video ${record.video_id}`, {
         predictionsFound: analysis.predictions.length,
         modifications: analysis.ai_modifications.length,
+        language: analysis.language,
+        transcriptSource, // Log which source we used
         processingTime: Date.now() - startTime
       });
 
@@ -310,6 +380,7 @@ export class RetryService {
       return {
         success: true,
         transcriptFound: true,
+        transcriptSource,
         predictionsFound: analysis.predictions.length
       };
 
@@ -323,6 +394,7 @@ export class RetryService {
       
       logger.error(`❌ Retry failed for video ${record.video_id}`, { 
         error,
+        transcriptSource,
         processingTime: Date.now() - startTime,
         isRateLimitError
       });
@@ -333,81 +405,81 @@ export class RetryService {
       return {
         success: false,
         transcriptFound: false,
+        transcriptSource,
         predictionsFound: 0,
         error: errorMessage
       };
     }
   }
 
-  // Find the best caption URL from automatic_captions
-  private findCaptionUrl(automaticCaptions: any, defaultLanguage?: string): string | null {
-    try {
-      // If default language is specified, try to find it first
-      if (defaultLanguage && automaticCaptions[defaultLanguage]) {
-        const langCaptions = automaticCaptions[defaultLanguage];
-        const json3Format = langCaptions.find((caption: any) => caption.ext === 'json3');
-        if (json3Format && json3Format.url) {
-          return json3Format.url;
-        }
-      }
+  // Enhanced out-of-subject validation with global language support
+  private enhancedOutOfSubjectValidation(analysis: any, transcriptText: string): { isOutOfSubject: boolean; reason: string } {
+    const lowerTranscript = transcriptText.toLowerCase();
+    
+    // Universal financial keywords (work across all languages)
+    const universalFinancialKeywords = [
+      'stock', 'market', 'investment', 'trading', 'price', 'trend', 'analysis',
+      'prediction', 'forecast', 'bullish', 'bearish', 'buy', 'sell', 'hold',
+      'economy', 'economic', 'finance', 'financial', 'currency', 'crypto',
+      'gold', 'silver', 'oil', 'inflation', 'interest', 'rate', 'recession',
+      'growth', 'decline', 'gain', 'loss', 'profit', 'portfolio',
+      'asset', 'bond', 'etf', 'fund', 'index', 'derivative', 'hedge',
+      'dividend', 'earnings', 'revenue', 'valuation', 'multiple'
+    ];
 
-      // Fallback to English
-      if (automaticCaptions.en) {
-        const enCaptions = automaticCaptions.en;
-        const json3Format = enCaptions.find((caption: any) => caption.ext === 'json3');
-        if (json3Format && json3Format.url) {
-          return json3Format.url;
-        }
-      }
+    // Non-financial keywords that indicate out-of-subject content
+    const nonFinancialKeywords = [
+      // Entertainment
+      'film', 'movie', 'music', 'song', 'artist', 'celebrity', 'tv show',
+      'gaming', 'game', 'video game', 'esports', 'streamer', 'playthrough',
+      // Cooking/Food
+      'recipe', 'cook', 'cooking', 'food', 'restaurant', 'chef', 'kitchen',
+      // Sports (general, not financial)
+      'football', 'soccer', 'basketball', 'tennis', 'olympics', 'sports',
+      // Technology (general, not financial)
+      'software', 'app', 'phone', 'computer', 'tech review', 'unboxing',
+      // Lifestyle
+      'travel', 'vacation', 'fashion', 'beauty', 'fitness', 'health'
+    ];
 
-      // Final fallback: use the first available language with json3 format
-      for (const [lang, captions] of Object.entries(automaticCaptions)) {
-        const langCaptions = captions as any[];
-        const json3Format = langCaptions.find((caption: any) => caption.ext === 'json3');
-        if (json3Format && json3Format.url) {
-          logger.info(`Using caption URL from language: ${lang}`);
-          return json3Format.url;
-        }
-      }
+    // Count financial terms
+    const universalCount = universalFinancialKeywords.filter(keyword => 
+      lowerTranscript.includes(keyword)
+    ).length;
 
-      return null;
-    } catch (error) {
-      logger.error('Error finding caption URL', { error });
-      return null;
+    const nonFinancialCount = nonFinancialKeywords.filter(keyword => 
+      lowerTranscript.includes(keyword)
+    ).length;
+
+    // Enhanced decision logic
+    const totalFinancialTerms = universalCount;
+    
+    // Transcript quality checks
+    const isLongEnough = transcriptText.length >= 200;
+    const hasSubstantialContent = transcriptText.length >= 500;
+
+    // Decision matrix
+    if (totalFinancialTerms >= 3) {
+      return { isOutOfSubject: false, reason: 'Contains substantial financial terminology' };
     }
-  }
-
-  // Fetch transcript from a caption URL
-  private async fetchTranscriptFromCaptionUrl(captionUrl: string): Promise<string> {
-    try {
-      const response = await fetch(captionUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch caption URL: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json() as any;
-      
-      // Parse YouTube's JSON3 format for timed text
-      if (data && data.events) {
-        const transcript = data.events
-          .filter((event: any) => event.segs) // Filter events with text segments
-          .map((event: any) => 
-            event.segs
-              .filter((seg: any) => seg.utf8) // Filter segments with text
-              .map((seg: any) => seg.utf8)
-              .join('')
-          )
-          .join(' ')
-          .trim();
-
-        return transcript;
-      }
-
-      return '';
-    } catch (error) {
-      logger.error('Error fetching transcript from caption URL', { error, captionUrl });
-      throw error;
+    
+    if (totalFinancialTerms >= 1 && hasSubstantialContent) {
+      return { isOutOfSubject: false, reason: 'Contains financial content with substantial discussion' };
     }
+
+    if (nonFinancialCount >= 2 && totalFinancialTerms === 0) {
+      return { isOutOfSubject: true, reason: 'Contains primarily non-financial entertainment content' };
+    }
+
+    if (!isLongEnough) {
+      return { isOutOfSubject: true, reason: 'Transcript too short to determine financial content' };
+    }
+
+    // Default: assume it's financial content if we can't clearly classify it as non-financial
+    return { 
+      isOutOfSubject: false, 
+      reason: 'Content appears to be financial or unclear classification - avoiding false positive' 
+    };
   }
 
   // Update retry status for a record
@@ -418,7 +490,8 @@ export class RetryService {
         .update({
           retry_count: retryCount,
           last_retry_at: new Date().toISOString(),
-          retry_reason: reason
+          retry_reason: reason,
+          updated_at: new Date().toISOString() // Always update timestamp
         })
         .eq('id', recordId);
     } catch (error) {
@@ -434,7 +507,8 @@ export class RetryService {
         .update({
           retry_count: this.MAX_RETRY_ATTEMPTS, // Set to max to prevent further retries
           last_retry_at: new Date().toISOString(),
-          retry_reason: null // Clear any previous error
+          retry_reason: null, // Clear any previous error
+          updated_at: new Date().toISOString()
         })
         .eq('id', recordId);
     } catch (error) {
@@ -442,7 +516,7 @@ export class RetryService {
     }
   }
 
-  // Get retry statistics including rate limit metrics
+  // Get retry statistics including rate limit metrics and transcript reuse
   async getRetryStatistics(): Promise<{
     totalEligible: number;
     maxAttemptsReached: number;
@@ -452,8 +526,9 @@ export class RetryService {
     try {
       const { data, error } = await supabaseService.getClient()
         .from('finfluencer_predictions')
-        .select('retry_count, last_retry_at')
-        .eq('predictions', '[]');
+        .select('retry_count, last_retry_at, subject_outcome, raw_transcript')
+        .eq('predictions', '[]')
+        .neq('subject_outcome', 'out_of_subject'); // Exclude out-of-subject videos
 
       if (error) {
         throw error;
@@ -461,6 +536,7 @@ export class RetryService {
 
       const totalEligible = data?.length || 0;
       const maxAttemptsReached = data?.filter(r => (r.retry_count || 0) >= this.MAX_RETRY_ATTEMPTS).length || 0;
+      const withSavedTranscripts = data?.filter(r => r.raw_transcript && r.raw_transcript.trim().length >= 50).length || 0;
 
       return {
         totalEligible,

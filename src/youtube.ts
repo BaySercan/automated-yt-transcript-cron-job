@@ -4,6 +4,8 @@ import { YouTubeVideo, YouTubeError } from './types';
 import { YouTubeError as YouTubeServiceError, TranscriptError } from './errors';
 import { logger, retryWithBackoff, RateLimiter, isValidYouTubeVideoId, isValidYouTubeChannelId, extractVideoIdFromUrl, parseYouTubeDuration } from './utils';
 import { rapidapiService } from './rapidapi';
+import { supadataService } from './supadataService';
+import { supadataRapidAPIService } from './supadataRapidAPIService';
 
 export class YouTubeService {
   private youtube: youtube_v3.Youtube;
@@ -185,7 +187,7 @@ export class YouTubeService {
     }
   }
 
-  // Get transcript for a video using RapidAPI only
+  // Get transcript for a video using 3-tier fallback system
   // Returns a structured result so callers can handle 'no transcript' gracefully
   async getVideoTranscript(videoId: string, videoLanguage?: string): Promise<{ transcript: string | null; error?: string }> {
     if (!isValidYouTubeVideoId(videoId)) {
@@ -193,29 +195,106 @@ export class YouTubeService {
     }
 
     try {
-      logger.info(`Fetching transcript from RapidAPI for video ${videoId}`);
-      const startTime = Date.now();
-      
-      if (!rapidapiService.isConfigured()) {
-        return { transcript: null, error: 'rapidapi_not_configured' };
+      // ========== TIER 1: RAPIDAPI (Primary) ==========
+      if (rapidapiService.isConfigured()) {
+        try {
+          logger.info(`🎯 [TIER 1] Fetching transcript from RapidAPI for video ${videoId}`);
+          const startTime = Date.now();
+          
+          const transcript = await rapidapiService.getVideoTranscript(videoId);
+          
+          if (transcript && transcript.trim().length > 0) {
+            const duration = Date.now() - startTime;
+            logger.info(`✅ [TIER 1 SUCCESS] RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
+            return { transcript };
+          }
+        } catch (error) {
+          const isRateLimitError = (error as Error).message.includes('429') || 
+                                  (error as Error).message.includes('rate limit');
+          const errorType = isRateLimitError ? 'rate_limited' : 'failed';
+          
+          logger.warn(`❌ [TIER 1 ${errorType.toUpperCase()}] RapidAPI transcript failed for video ${videoId}, trying Tier 2`, { 
+            error: (error as Error).message,
+            service: 'rapidapi'
+          });
+        }
       }
 
-      const transcript = await rapidapiService.getVideoTranscript(videoId);
-      
-      if (transcript && transcript.trim().length > 0) {
-        const duration = Date.now() - startTime;
-        logger.info(`Successfully fetched transcript from RapidAPI for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
-        return { transcript };
-      } else {
-        return { transcript: null, error: 'no_transcript_available' };
+      // ========== TIER 2: SUPADATA RAPIDAPI (Secondary) ==========
+      if (supadataRapidAPIService.isConfigured()) {
+        try {
+          logger.info(`🎯 [TIER 2] Fetching transcript from Supadata RapidAPI for video ${videoId}`);
+          const startTime = Date.now();
+          
+          const transcript = await supadataRapidAPIService.getVideoTranscript(videoId);
+          
+          if (transcript && transcript.trim().length > 0) {
+            const duration = Date.now() - startTime;
+            logger.info(`✅ [TIER 2 SUCCESS] Supadata RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
+            return { transcript };
+          }
+        } catch (error) {
+          const isRateLimitError = (error as Error).message.includes('429') || 
+                                  (error as Error).message.includes('rate limit');
+          const isCreditError = (error as Error).message.includes('insufficient') || 
+                               (error as Error).message.includes('credit');
+          
+          let errorType = 'failed';
+          if (isRateLimitError) errorType = 'rate_limited';
+          else if (isCreditError) errorType = 'credits_exhausted';
+          
+          logger.warn(`❌ [TIER 2 ${errorType.toUpperCase()}] Supadata RapidAPI transcript failed for video ${videoId}, trying Tier 3`, { 
+            error: (error as Error).message,
+            service: 'supadata-rapidapi'
+          });
+        }
       }
+
+      // ========== TIER 3: SUPADATA DIRECT (Tertiary) ==========
+      if (supadataService.isConfigured()) {
+        try {
+          logger.info(`🎯 [TIER 3] Fetching transcript from Supadata Direct for video ${videoId}`);
+          const startTime = Date.now();
+          
+          const transcript = await supadataService.getVideoTranscript(videoId);
+          
+          if (transcript && transcript.trim().length > 0) {
+            const duration = Date.now() - startTime;
+            logger.info(`✅ [TIER 3 SUCCESS] Supadata Direct transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
+            return { transcript };
+          }
+        } catch (error) {
+          const isCreditError = (error as Error).message.includes('insufficient') || 
+                               (error as Error).message.includes('credit');
+          
+          if (isCreditError) {
+            logger.error(`💳 [TIER 3 CREDITS EXHAUSTED] Supadata Direct credits exhausted for video ${videoId}`, { 
+              error: (error as Error).message,
+              service: 'supadata-direct'
+            });
+            return { transcript: null, error: 'supadata_credits_exhausted' };
+          }
+          
+          logger.warn(`❌ [TIER 3 FAILED] Supadata Direct transcript failed for video ${videoId}`, { 
+            error: (error as Error).message,
+            service: 'supadata-direct'
+          });
+        }
+      }
+
+      // ========== ALL TIERS FAILED ==========
+      logger.error(`💥 [ALL TIERS FAILED] No transcript available for video ${videoId} from any service`);
+      return { transcript: null, error: 'no_transcript_available' };
+      
     } catch (error) {
       const msg = (error as Error).message || String(error);
-      logger.error(`RapidAPI transcript fetch failed for video ${videoId}`, { error });
-      return { transcript: null, error: `rapidapi_error:${msg}` };
+      logger.error(`💥 [SYSTEM ERROR] All transcript APIs failed for video ${videoId}`, { 
+        error: msg,
+        videoId
+      });
+      return { transcript: null, error: `transcript_error:${msg}` };
     }
   }
-
 
   // Extract language from video metadata
   extractVideoLanguage(video: YouTubeVideo): string | undefined {
@@ -343,6 +422,16 @@ export class YouTubeService {
       daily: estimatedUsage,
       percentage: Math.round(percentage * 100) / 100,
       remaining
+    };
+  }
+
+  // Get combined API statistics for all three services
+  getApiStats(): any {
+    return {
+      rapidapi: rapidapiService.getRateLimitStats(),
+      supadataRapidAPI: supadataRapidAPIService.getRateLimitStats(),
+      supadata: supadataService.getRateLimitStats(),
+      supadataCredits: supadataService.getCreditStats()
     };
   }
 }

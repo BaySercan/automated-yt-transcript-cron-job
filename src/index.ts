@@ -1,8 +1,10 @@
 import { config, validateConfig } from './config';
 import { supabaseService } from './supabase';
 import { youtubeService, YouTubeService } from './youtube';
-import { aiAnalyzer } from './analyzer';
+import { globalAIAnalyzer } from './enhancedAnalyzer';
 import { rapidapiService } from './rapidapi';
+import { supadataService } from './supadataService';
+import { supadataRapidAPIService } from './supadataRapidAPIService';
 import { retryService } from './retryService';
 import { logger, setupGracefulShutdown, getMemoryUsage, parseYouTubeDuration } from './utils';
 import { CronJobStats } from './types';
@@ -30,7 +32,7 @@ class FinfluencerTracker {
   async run(): Promise<void> {
     try {
       logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
-        version: '1.1.15',
+        version: '1.2.0',
         environment: config.timezone,
         model: config.openrouterModel
       });
@@ -60,30 +62,101 @@ class FinfluencerTracker {
     }
   }
 
-  // Test all external connections
+  // Test all external connections with graceful degradation
   private async testConnections(): Promise<void> {
     logger.info('🔗 Testing external connections...');
 
-    try {
-      const connectionTests = [
-        supabaseService.testConnection(),
-        youtubeService.testConnection(),
-        aiAnalyzer.testConnection()
-      ];
+    // ========== ESSENTIAL SERVICES (Must Pass) ==========
+    logger.info('🔑 Testing essential services...');
+    const essentialServices = [
+      { name: 'Supabase', service: supabaseService },
+      { name: 'YouTube API', service: youtubeService }
+    ];
 
-      // Test RapidAPI if configured
-      if (rapidapiService.isConfigured()) {
-        connectionTests.push(rapidapiService.testConnection());
-      } else {
-        logger.warn('⚠️ RapidAPI not configured, skipping connection test');
+    for (const { name, service } of essentialServices) {
+      try {
+        await service.testConnection();
+        logger.info(`✅ ${name} connection successful`);
+      } catch (error) {
+        logger.error(`❌ ${name} connection failed`, { error });
+        throw new ConfigurationError(`Essential service ${name} is not available: ${(error as Error).message}`);
+      }
+    }
+
+    // ========== OPTIONAL TRANSCRIPT SERVICES (With Fallbacks) ==========
+    logger.info('🎯 Testing optional transcript services...');
+    const transcriptServices = [
+      { name: 'RapidAPI', service: rapidapiService, isConfigured: () => rapidapiService.isConfigured() },
+      { name: 'Supadata RapidAPI', service: supadataRapidAPIService, isConfigured: () => supadataRapidAPIService.isConfigured() },
+      { name: 'Supadata Direct', service: supadataService, isConfigured: () => supadataService.isConfigured() }
+    ];
+
+    let availableTranscriptServices = 0;
+    let transcriptServiceResults: Array<{name: string, success: boolean, error?: string}> = [];
+
+    for (const { name, service, isConfigured } of transcriptServices) {
+      if (!isConfigured()) {
+        logger.warn(`⚠️ ${name} not configured, skipping connection test`);
+        transcriptServiceResults.push({ name, success: false, error: 'Not configured' });
+        continue;
       }
 
-      await Promise.all(connectionTests);
-
-      logger.info('✅ All connections successful');
-    } catch (error) {
-      throw new ConfigurationError(`Connection test failed: ${(error as Error).message}`);
+      try {
+        await service.testConnection();
+        logger.info(`✅ ${name} connection successful`);
+        transcriptServiceResults.push({ name, success: true });
+        availableTranscriptServices++;
+      } catch (error) {
+        const errorMsg = (error as Error).message;
+        logger.warn(`❌ ${name} connection failed: ${errorMsg}`, { error });
+        transcriptServiceResults.push({ name, success: false, error: errorMsg });
+      }
     }
+
+    // ========== VALIDATION: At least one transcript service must be available ==========
+    if (availableTranscriptServices === 0) {
+      const failedServices = transcriptServiceResults
+        .filter(r => !r.success)
+        .map(r => `${r.name}: ${r.error}`)
+        .join(', ');
+      
+      logger.error('💥 No transcript services are available!', { 
+        failedServices,
+        availableServices: availableTranscriptServices 
+      });
+      throw new ConfigurationError(`No transcript services available. Failed services: ${failedServices}`);
+    }
+
+    // ========== LOG SUMMARY ==========
+    const successfulServices = transcriptServiceResults.filter(r => r.success).map(r => r.name);
+    const failedServices = transcriptServiceResults.filter(r => !r.success).map(r => r.name);
+
+    logger.info('📊 Connection Test Summary:', {
+      essentialServices: 'All passed ✅',
+      transcriptServices: {
+        total: transcriptServices.length,
+        available: availableTranscriptServices,
+        successful: successfulServices,
+        failed: failedServices.length > 0 ? failedServices : 'None'
+      }
+    });
+
+    // ========== LOG ADDITIONAL INFO ==========
+    // Log Supadata credit statistics if available
+    if (supadataService.isConfigured() && transcriptServiceResults.find(r => r.name === 'Supadata Direct')?.success) {
+      try {
+        const creditStats = supadataService.getCreditStats();
+        logger.info('💳 Supadata Credit Status:', {
+          creditsUsed: creditStats.creditsUsed,
+          creditsRemaining: creditStats.creditsRemaining,
+          activeEndpoint: creditStats.activeEndpoint
+        });
+      } catch (error) {
+        logger.warn('Failed to get Supadata credit statistics', { error });
+      }
+    }
+
+    logger.info('🎉 Connection testing completed - Application ready to start!');
   }
 
   // Process all active channels
@@ -265,7 +338,7 @@ class FinfluencerTracker {
           channel_id: channel.channel_id,
           channel_name: channel.channel_name,
           video_id: video.videoId,
-          video_title: video.title,
+          video_title: video.video_title,
           post_date: video.publishedAt ? video.publishedAt.split('T')[0] : new Date().toISOString().split('T')[0],
           language: 'unknown',
           transcript_summary: 'No subtitles/captions available',
@@ -276,26 +349,73 @@ class FinfluencerTracker {
         return;
       }
 
-      // Analyze with AI (only when we have valid captions)
-      const analysis = await aiAnalyzer.analyzeTranscript(transcriptText, {
-        videoId: video.videoId,
-        title: video.title,
-        channelId: channel.channel_id,
-        channelName: channel.channel_name,
-        publishedAt: video.publishedAt
-      });
+      // Analyze with AI (only when we have valid captions) - SMARTER STATUS LOGIC
+      let analysis: any;
+      let analysisSuccess = false;
+      
+      try {
+        analysis = await globalAIAnalyzer.analyzeTranscript(transcriptText, {
+          videoId: video.videoId,
+          title: video.title,
+          channelId: channel.channel_id,
+          channelName: channel.channel_name,
+          publishedAt: video.publishedAt
+        });
+        
+        // Check if analysis returned valid results
+        if (analysis && 
+            analysis.predictions && 
+            Array.isArray(analysis.predictions) &&
+            (analysis.predictions.length > 0 || 
+             (analysis.transcript_summary && 
+              !analysis.transcript_summary.includes('failed') &&
+              !analysis.transcript_summary.includes('error')))) {
+          analysisSuccess = true;
+          logger.info(`✅ AI analysis successful for video ${video.videoId}`, {
+            predictionsFound: analysis.predictions.length,
+            hasValidSummary: !!(analysis.transcript_summary && 
+              !analysis.transcript_summary.includes('failed') &&
+              !analysis.transcript_summary.includes('error'))
+          });
+        } else {
+          logger.warn(`⚠️ AI analysis returned invalid/empty results for video ${video.videoId}`, {
+            hasAnalysis: !!analysis,
+            predictionsType: typeof analysis?.predictions,
+            predictionsLength: Array.isArray(analysis?.predictions) ? analysis.predictions.length : 'not_array',
+            summaryValid: !!(analysis?.transcript_summary && 
+              !analysis.transcript_summary.includes('failed') &&
+              !analysis.transcript_summary.includes('error'))
+          });
+        }
+      } catch (analysisError) {
+        logger.error(`❌ AI analysis failed for video ${video.videoId}`, { 
+          error: (analysisError as Error).message 
+        });
+        analysis = null;
+        analysisSuccess = false;
+      }
 
-      // Save to database
+      // Determine subject outcome based on analysis success
+      const subjectOutcome = analysisSuccess ? 'analyzed' : 'pending';
+      const shouldRetry = !analysisSuccess;
+
+      if (shouldRetry) {
+        logger.info(`📝 Marking video ${video.videoId} as pending for retry (analysis failed/invalid)`);
+      }
+
+      // Save to database with appropriate status
       await supabaseService.insertPrediction({
         channel_id: channel.channel_id,
         channel_name: channel.channel_name,
         video_id: video.videoId,
         video_title: video.title,
         post_date: video.publishedAt.split('T')[0],
-        language: analysis.language,
-        transcript_summary: analysis.transcript_summary,
-        predictions: analysis.predictions,
-        ai_modifications: analysis.ai_modifications
+        language: analysis?.language || 'unknown',
+        transcript_summary: analysis?.transcript_summary || (shouldRetry ? 'Analysis failed - marked for retry' : 'No analysis available'),
+        predictions: analysis?.predictions || [],
+        ai_modifications: analysis?.ai_modifications || [],
+        raw_transcript: transcriptText, // Add raw transcript storage
+        subject_outcome: subjectOutcome // Smart status: 'analyzed' if successful, 'pending' for retry
       });
 
       // Update channel last_checked_at immediately after successful video processing
@@ -305,8 +425,10 @@ class FinfluencerTracker {
       }
 
       logger.info(`✅ Successfully processed video: ${video.videoId}`, {
-        predictionsFound: analysis.predictions.length,
-        modifications: analysis.ai_modifications.length
+        predictionsFound: analysis?.predictions?.length || 0,
+        modifications: analysis?.ai_modifications?.length || 0,
+        status: subjectOutcome,
+        needsRetry: shouldRetry
       });
       this.stats.videos_with_captions = (this.stats.videos_with_captions || 0) + 1;
     } catch (error) {
@@ -323,7 +445,8 @@ class FinfluencerTracker {
           language: 'unknown',
           transcript_summary: `Processing failed: ${(error as Error).message}`,
           predictions: [],
-          ai_modifications: []
+          ai_modifications: [],
+          subject_outcome: 'pending' // Mark for retry
         });
       } catch (dbError) {
         logger.error(`Failed to create fallback record for video ${video.videoId}`, { error: dbError });
@@ -341,13 +464,18 @@ class FinfluencerTracker {
 
     const memory = getMemoryUsage();
 
+    // Add Supadata credit usage to final stats
+    const apiStats = youtubeService.getApiStats();
+    
     logger.info('📊 Final Statistics', {
       ...this.stats,
       duration_seconds: duration,
       memory_usage_mb: memory.used,
       success_rate: this.stats.total_videos > 0 
         ? Math.round((this.stats.processed_videos / this.stats.total_videos) * 100)
-        : 0
+        : 0,
+      supadata_credits_used: apiStats.supadataCredits?.creditsUsed || 0,
+      supadata_credits_remaining: apiStats.supadataCredits?.creditsRemaining || 100
     });
   }
 
@@ -355,6 +483,16 @@ class FinfluencerTracker {
   async shutdown(): Promise<void> {
     logger.info('🛑 Starting graceful shutdown...');
     this.isShuttingDown = true;
+    
+    // Log final Supadata stats
+    if (supadataService.isConfigured()) {
+      const creditStats = supadataService.getCreditStats();
+      logger.info('💳 Final Supadata Credit Status:', {
+        creditsUsed: creditStats.creditsUsed,
+        creditsRemaining: creditStats.creditsRemaining,
+        activeEndpoint: creditStats.activeEndpoint
+      });
+    }
     
     // Give some time for ongoing operations to complete
     await new Promise(resolve => setTimeout(resolve, 5000));

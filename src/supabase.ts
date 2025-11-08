@@ -159,22 +159,35 @@ export class SupabaseService {
     }
   }
 
-  // Update prediction with retry results
+  // Update prediction with retry results (enhanced with new fields)
   async updatePredictionWithRetry(predictionId: string, updates: {
     transcript_summary: string;
     predictions: any[];
     ai_modifications: any[];
     language: string;
+    raw_transcript?: string;
+    subject_outcome?: 'pending' | 'out_of_subject' | 'analyzed';
   }): Promise<void> {
     try {
+      const updateData: any = {
+        transcript_summary: updates.transcript_summary,
+        predictions: updates.predictions,
+        ai_modifications: updates.ai_modifications,
+        language: updates.language,
+        updated_at: new Date().toISOString() // Always update timestamp
+      };
+
+      // Add optional fields if provided
+      if (updates.raw_transcript !== undefined) {
+        updateData.raw_transcript = updates.raw_transcript;
+      }
+      if (updates.subject_outcome !== undefined) {
+        updateData.subject_outcome = updates.subject_outcome;
+      }
+
       const { error } = await this.client
         .from('finfluencer_predictions')
-        .update({
-          transcript_summary: updates.transcript_summary,
-          predictions: updates.predictions,
-          ai_modifications: updates.ai_modifications,
-          language: updates.language
-        })
+        .update(updateData)
         .eq('id', predictionId);
 
       if (error) {
@@ -184,6 +197,52 @@ export class SupabaseService {
       logger.debug(`Updated prediction ${predictionId} with retry results`);
     } catch (error) {
       logger.error(`Error updating prediction ${predictionId} with retry`, { error });
+      throw error;
+    }
+  }
+
+  // Mark video as out of subject (no financial predictions)
+  async markVideoAsOutOfSubject(predictionId: string, rawTranscript: string): Promise<void> {
+    try {
+      const { error } = await this.client
+        .from('finfluencer_predictions')
+        .update({
+          predictions: ['Out of subject, no available financial predictions in the video'],
+          ai_modifications: [],
+          language: 'unknown',
+          transcript_summary: 'No financial predictions found in this video content',
+          raw_transcript: rawTranscript,
+          subject_outcome: 'out_of_subject',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', predictionId);
+
+      if (error) {
+        throw new DatabaseError(`Failed to mark video as out of subject: ${error.message}`, { cause: error });
+      }
+
+      logger.info(`Marked prediction ${predictionId} as out of subject`);
+    } catch (error) {
+      logger.error(`Error marking prediction ${predictionId} as out of subject`, { error });
+      throw error;
+    }
+  }
+
+  // Update only timestamp (for retry attempts)
+  async updatePredictionTimestamp(predictionId: string): Promise<void> {
+    try {
+      const { error } = await this.client
+        .from('finfluencer_predictions')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', predictionId);
+
+      if (error) {
+        throw new DatabaseError(`Failed to update prediction timestamp: ${error.message}`, { cause: error });
+      }
+
+      logger.debug(`Updated timestamp for prediction ${predictionId}`);
+    } catch (error) {
+      logger.error(`Error updating prediction timestamp ${predictionId}`, { error });
       throw error;
     }
   }

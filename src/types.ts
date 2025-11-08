@@ -19,6 +19,9 @@ export interface FinfluencerPrediction {
   predictions: Prediction[];
   ai_modifications: AIModification[];
   created_at: string;
+  updated_at?: string;
+  raw_transcript?: string;
+  subject_outcome?: 'pending' | 'out_of_subject' | 'analyzed';
 }
 
 export interface Prediction {
@@ -63,6 +66,8 @@ export interface AIAnalysisResult {
   transcript_summary: string;
   predictions: Prediction[];
   ai_modifications: AIModification[];
+  raw_transcript?: string;
+  subject_outcome?: 'pending' | 'out_of_subject' | 'analyzed';
 }
 
 export interface CronJobStats {
