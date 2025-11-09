@@ -15,12 +15,6 @@ COPY package*.json ./
 COPY README.md ./
 COPY .env.example ./
 
-# Compile TypeScript
-RUN npm run build
-
-# Clean up dev dependencies to reduce image size
-RUN npm prune --production
-
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S finfluencer -u 1001
