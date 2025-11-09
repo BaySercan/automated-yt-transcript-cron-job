@@ -499,6 +499,18 @@ function Main {
         
         Write-LogSuccess "✅ Version synchronization completed"
     }
+
+    # Test TypeScript compilation
+    Write-LogInfo "Testing TypeScript compilation..."
+    $buildOutput = & npm run build 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-LogError "TypeScript compilation failed!"
+        Write-LogInfo "Build output:"
+        Write-Host $buildOutput
+        return $false
+    } else {
+        Write-LogSuccess "✅ TypeScript compilation succeeded!"
+    }
     
     # Build, test, and push (only if not using -NoGit)
     if (-not $NoGit) {
