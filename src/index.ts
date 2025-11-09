@@ -32,7 +32,7 @@ class FinfluencerTracker {
   async run(): Promise<void> {
     try {
       logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
-        version: '1.2.2',
+        version: '1.2.3',
         environment: config.timezone,
         model: config.openrouterModel
       });
