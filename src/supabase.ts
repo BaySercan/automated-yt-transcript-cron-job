@@ -115,51 +115,243 @@ export class SupabaseService {
     }
   }
 
-  // Insert new prediction record
-  async insertPrediction(prediction: Omit<FinfluencerPrediction, 'id' | 'created_at'>): Promise<string> {
-    try {
-      const { data, error } = await this.client
-        .from('finfluencer_predictions')
-        .insert(prediction)
-        .select('id')
-        .single();
+  // ==================== UNIFIED VIDEO RECORDING SYSTEM ====================
+  // This is the single, consistent method for recording all video analysis
 
-      if (error) {
-        throw new DatabaseError(`Failed to insert prediction: ${error.message}`, { cause: error });
+  /**
+   * Unified method to record video analysis with consistent status management
+   * 
+   * Status Logic:
+   * - 'pending' = No transcript available OR transcript saved but AI analysis failed
+   * - 'analyzed' = AI analysis completed (success, empty predictions, or meaningful failure)
+   * - 'out_of_subject' = Non-financial content detected
+   */
+  async recordVideoAnalysis(params: {
+    // Required fields
+    videoId: string;
+    channelId: string;
+    channelName: string;
+    videoTitle: string;
+    postDate: string;
+    
+    // Analysis results (can be partial)
+    transcriptSummary?: string;
+    predictions?: any[];
+    aiModifications?: any[];
+    language?: string;
+    
+    // Processing state
+    rawTranscript?: string | null;
+    hasTranscript?: boolean; // Was transcript successfully retrieved?
+    aiAnalysisSuccess?: boolean; // Did AI analysis complete successfully?
+    hasFinancialContent?: boolean; // Is this financial content?
+    
+    // Context for status determination
+    context: {
+      isRetry?: boolean; // Is this a retry attempt?
+      retryAttemptNumber?: number;
+      errorMessage?: string;
+      previousRecordId?: string;
+    };
+  }): Promise<string> {
+    try {
+      const {
+        videoId,
+        channelId,
+        channelName,
+        videoTitle,
+        postDate,
+        transcriptSummary = 'No summary available',
+        predictions = [],
+        aiModifications = [],
+        language = 'unknown',
+        rawTranscript = null,
+        hasTranscript = false,
+        aiAnalysisSuccess = false,
+        hasFinancialContent = true,
+        context
+      } = params;
+
+      // Determine subject outcome based on analysis results
+      const subjectOutcome = this.determineSubjectOutcome({
+        hasTranscript,
+        aiAnalysisSuccess,
+        hasFinancialContent,
+        predictions: predictions,
+        transcriptSummary,
+        isRetry: context.isRetry
+      });
+
+      // Build the record data with consistent field mapping
+      const recordData: any = {
+        channel_id: channelId,
+        channel_name: channelName,
+        video_id: videoId,
+        video_title: videoTitle,
+        post_date: postDate,
+        language: language,
+        transcript_summary: transcriptSummary,
+        predictions: predictions,
+        ai_modifications: aiModifications,
+        updated_at: new Date().toISOString()
+      };
+
+      // Always include raw transcript if available
+      if (rawTranscript && rawTranscript.trim().length > 0) {
+        recordData.raw_transcript = rawTranscript;
+        logger.debug(`Including raw_transcript in record (${rawTranscript.length} characters) for video ${videoId}`);
       }
 
-      logger.info(`Inserted prediction for video ${prediction.video_id}`);
-      return data.id;
+      // Include subject outcome
+      recordData.subject_outcome = subjectOutcome;
+
+      // Include retry information if this is a retry
+      if (context.isRetry && context.retryAttemptNumber !== undefined) {
+        recordData.retry_count = context.retryAttemptNumber;
+        recordData.last_retry_at = new Date().toISOString();
+        if (context.errorMessage) {
+          recordData.retry_reason = context.errorMessage;
+        }
+      }
+
+      // Determine if this is an update or insert
+      const isUpdate = context.isRetry && context.previousRecordId;
+      const tableOperation = isUpdate ? 'update' : 'insert';
+      const queryBuilder = isUpdate 
+        ? this.client.from('finfluencer_predictions').update(recordData).eq('id', context.previousRecordId)
+        : this.client.from('finfluencer_predictions').insert(recordData);
+
+      const operation = isUpdate 
+        ? await queryBuilder.select('id').single()
+        : await queryBuilder.select('id').single();
+
+      if (operation.error) {
+        throw new DatabaseError(`Failed to ${tableOperation} video analysis: ${operation.error.message}`, { 
+          cause: operation.error
+        });
+      }
+
+      const recordId = operation.data.id;
+      
+      logger.info(`📝 ${isUpdate ? 'Updated' : 'Recorded'} video analysis for ${videoId}`, {
+        recordId,
+        subjectOutcome,
+        hasTranscript,
+        hasRawTranscript: !!rawTranscript,
+        aiAnalysisSuccess,
+        predictionsCount: predictions.length,
+        isRetry: context.isRetry
+      });
+
+      return recordId;
+
     } catch (error) {
-      logger.error(`Error inserting prediction for video ${prediction.video_id}`, { error });
+      logger.error(`Failed to record video analysis for ${params.videoId}`, { 
+        error: (error as Error).message,
+        params: {
+          hasTranscript: params.hasTranscript,
+          aiAnalysisSuccess: params.aiAnalysisSuccess,
+          predictionsCount: params.predictions?.length || 0
+        }
+      });
       throw error;
     }
   }
 
-  // Batch insert predictions (for efficiency)
+  /**
+   * Determine the appropriate subject outcome based on processing results
+   */
+  private determineSubjectOutcome(params: {
+    hasTranscript: boolean;
+    aiAnalysisSuccess: boolean;
+    hasFinancialContent: boolean;
+    predictions: any[];
+    transcriptSummary: string;
+    isRetry?: boolean;
+  }): 'pending' | 'analyzed' | 'out_of_subject' {
+    const { hasTranscript, aiAnalysisSuccess, hasFinancialContent, predictions, transcriptSummary, isRetry } = params;
+
+    // No transcript available at all
+    if (!hasTranscript) {
+      return 'pending';
+    }
+
+    // Non-financial content detected
+    if (!hasFinancialContent || transcriptSummary.toLowerCase().includes('out of subject')) {
+      return 'out_of_subject';
+    }
+
+    // Has transcript but AI analysis failed
+    if (!aiAnalysisSuccess) {
+      return 'pending';
+    }
+
+    // AI analysis completed - check if we have meaningful results
+    const hasValidPredictions = predictions && predictions.length > 0;
+    const hasValidSummary = transcriptSummary && 
+      !transcriptSummary.toLowerCase().includes('failed') && 
+      !transcriptSummary.toLowerCase().includes('error') &&
+      !transcriptSummary.toLowerCase().includes('no analysis');
+
+    // If we have either predictions OR a valid summary, mark as analyzed
+    if (hasValidPredictions || hasValidSummary) {
+      return 'analyzed';
+    }
+
+    // AI completed but no meaningful results
+    return 'pending';
+  }
+
+  // ==================== LEGACY METHODS (DEPRECATED) ====================
+  // These methods are kept for backward compatibility but should be replaced
+  // with recordVideoAnalysis() in the future
+
+  // Insert new prediction record - LEGACY (use recordVideoAnalysis instead)
+  async insertPrediction(prediction: Omit<FinfluencerPrediction, 'id' | 'created_at'>): Promise<string> {
+    logger.warn('Using deprecated insertPrediction method - should use recordVideoAnalysis');
+    
+    // Convert legacy format to new format
+    return this.recordVideoAnalysis({
+      videoId: prediction.video_id,
+      channelId: prediction.channel_id,
+      channelName: prediction.channel_name,
+      videoTitle: prediction.video_title,
+      postDate: prediction.post_date,
+      transcriptSummary: prediction.transcript_summary,
+      predictions: prediction.predictions,
+      aiModifications: prediction.ai_modifications,
+      language: prediction.language,
+      rawTranscript: prediction.raw_transcript || null,
+      hasTranscript: !!(prediction.raw_transcript),
+      aiAnalysisSuccess: prediction.predictions.length > 0 || 
+        (prediction.transcript_summary && !prediction.transcript_summary.toLowerCase().includes('no analysis')),
+      hasFinancialContent: prediction.subject_outcome !== 'out_of_subject',
+      context: { isRetry: false }
+    });
+  }
+
+  // Batch insert predictions (for efficiency) - LEGACY
   async insertPredictionsBatch(predictions: Omit<FinfluencerPrediction, 'id' | 'created_at'>[]): Promise<string[]> {
+    logger.warn('Using deprecated insertPredictionsBatch method - should use recordVideoAnalysis in loop');
+    
     if (predictions.length === 0) return [];
 
-    try {
-      const { data, error } = await this.client
-        .from('finfluencer_predictions')
-        .insert(predictions)
-        .select('id');
-
-      if (error) {
-        throw new DatabaseError(`Failed to insert predictions batch: ${error.message}`, { cause: error });
+    const results: string[] = [];
+    
+    for (const prediction of predictions) {
+      try {
+        const id = await this.insertPrediction(prediction);
+        results.push(id);
+      } catch (error) {
+        logger.error('Failed to insert prediction in batch', { error, videoId: prediction.video_id });
+        // Continue with other predictions
       }
-
-      const insertedIds = data?.map(item => item.id) || [];
-      logger.info(`Inserted batch of ${insertedIds.length} predictions`);
-      return insertedIds;
-    } catch (error) {
-      logger.error('Error inserting predictions batch', { error, count: predictions.length });
-      throw error;
     }
+    
+    return results;
   }
 
-  // Update prediction with retry results (enhanced with new fields)
+  // Update prediction with retry results - LEGACY (use recordVideoAnalysis with isRetry: true)
   async updatePredictionWithRetry(predictionId: string, updates: {
     transcript_summary: string;
     predictions: any[];
@@ -168,68 +360,92 @@ export class SupabaseService {
     raw_transcript?: string;
     subject_outcome?: 'pending' | 'out_of_subject' | 'analyzed';
   }): Promise<void> {
+    logger.warn('Using deprecated updatePredictionWithRetry method - should use recordVideoAnalysis with isRetry: true');
+    
     try {
-      const updateData: any = {
-        transcript_summary: updates.transcript_summary,
-        predictions: updates.predictions,
-        ai_modifications: updates.ai_modifications,
-        language: updates.language,
-        updated_at: new Date().toISOString() // Always update timestamp
-      };
-
-      // Add optional fields if provided
-      if (updates.raw_transcript !== undefined) {
-        updateData.raw_transcript = updates.raw_transcript;
-      }
-      if (updates.subject_outcome !== undefined) {
-        updateData.subject_outcome = updates.subject_outcome;
-      }
-
-      const { error } = await this.client
+      // Get the existing record to convert to new format
+      const { data: existingRecord, error: fetchError } = await this.client
         .from('finfluencer_predictions')
-        .update(updateData)
-        .eq('id', predictionId);
+        .select('*')
+        .eq('id', predictionId)
+        .single();
 
-      if (error) {
-        throw new DatabaseError(`Failed to update prediction with retry: ${error.message}`, { cause: error });
+      if (fetchError || !existingRecord) {
+        throw new DatabaseError(`Failed to fetch existing record for update: ${fetchError?.message}`);
       }
 
-      logger.debug(`Updated prediction ${predictionId} with retry results`);
+      // Use recordVideoAnalysis to update
+      await this.recordVideoAnalysis({
+        videoId: existingRecord.video_id,
+        channelId: existingRecord.channel_id,
+        channelName: existingRecord.channel_name,
+        videoTitle: existingRecord.video_title,
+        postDate: existingRecord.post_date,
+        transcriptSummary: updates.transcript_summary,
+        predictions: updates.predictions,
+        aiModifications: updates.ai_modifications,
+        language: updates.language,
+        rawTranscript: updates.raw_transcript || existingRecord.raw_transcript,
+        hasTranscript: !!(updates.raw_transcript || existingRecord.raw_transcript),
+        aiAnalysisSuccess: true, // If we're updating with results, analysis succeeded
+        hasFinancialContent: updates.subject_outcome !== 'out_of_subject',
+        context: { 
+          isRetry: true, 
+          retryAttemptNumber: (existingRecord.retry_count || 0) + 1,
+          previousRecordId: predictionId
+        }
+      });
+
     } catch (error) {
       logger.error(`Error updating prediction ${predictionId} with retry`, { error });
       throw error;
     }
   }
 
-  // Mark video as out of subject (no financial predictions)
+  // Mark video as out of subject - LEGACY (use recordVideoAnalysis with hasFinancialContent: false)
   async markVideoAsOutOfSubject(predictionId: string, rawTranscript: string): Promise<void> {
+    logger.warn('Using deprecated markVideoAsOutOfSubject method - should use recordVideoAnalysis with hasFinancialContent: false');
+    
     try {
-      const { error } = await this.client
+      // Get the existing record
+      const { data: existingRecord, error: fetchError } = await this.client
         .from('finfluencer_predictions')
-        .update({
-          predictions: ['Out of subject, no available financial predictions in the video'],
-          ai_modifications: [],
-          language: 'unknown',
-          transcript_summary: 'No financial predictions found in this video content',
-          raw_transcript: rawTranscript,
-          subject_outcome: 'out_of_subject',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', predictionId);
+        .select('*')
+        .eq('id', predictionId)
+        .single();
 
-      if (error) {
-        throw new DatabaseError(`Failed to mark video as out of subject: ${error.message}`, { cause: error });
+      if (fetchError || !existingRecord) {
+        throw new DatabaseError(`Failed to fetch existing record: ${fetchError?.message}`);
       }
 
-      logger.info(`Marked prediction ${predictionId} as out of subject`);
+      // Use recordVideoAnalysis to mark as out of subject
+      await this.recordVideoAnalysis({
+        videoId: existingRecord.video_id,
+        channelId: existingRecord.channel_id,
+        channelName: existingRecord.channel_name,
+        videoTitle: existingRecord.video_title,
+        postDate: existingRecord.post_date,
+        transcriptSummary: 'No financial predictions found in this video content',
+        predictions: ['Out of subject, no available financial predictions in the video'],
+        aiModifications: [],
+        language: 'unknown',
+        rawTranscript: rawTranscript,
+        hasTranscript: true,
+        aiAnalysisSuccess: true,
+        hasFinancialContent: false, // This is the key difference
+        context: { isRetry: true, previousRecordId: predictionId }
+      });
+
     } catch (error) {
       logger.error(`Error marking prediction ${predictionId} as out of subject`, { error });
       throw error;
     }
   }
 
-  // Update only timestamp (for retry attempts)
+  // Update only timestamp (for retry attempts) - LEGACY
   async updatePredictionTimestamp(predictionId: string): Promise<void> {
+    logger.warn('Using deprecated updatePredictionTimestamp method - should use recordVideoAnalysis');
+    
     try {
       const { error } = await this.client
         .from('finfluencer_predictions')
@@ -246,6 +462,8 @@ export class SupabaseService {
       throw error;
     }
   }
+
+  // ==================== UTILITY METHODS ====================
 
   // Get channel statistics
   async getChannelStats(channelId: string): Promise<{
@@ -343,6 +561,62 @@ export class SupabaseService {
       };
     } catch (error) {
       logger.error('Error getting overall stats', { error });
+      throw error;
+    }
+  }
+
+  // Get records that need retry with smart transcript checking
+  async getRecordsForRetry(): Promise<Array<{
+    id: string;
+    video_id: string;
+    channel_id: string;
+    video_title: string;
+    retry_count: number;
+    last_retry_at: string | null;
+    retry_reason: string | null;
+    post_date: string;
+    raw_transcript?: string | null;
+    hasTranscript: boolean;
+  }>> {
+    try {
+      const { data, error } = await this.client
+        .from('finfluencer_predictions')
+        .select(`
+          id,
+          video_id,
+          channel_id,
+          video_title,
+          retry_count,
+          last_retry_at,
+          retry_reason,
+          post_date,
+          subject_outcome,
+          raw_transcript,
+          transcript_summary
+        `)
+        .eq('subject_outcome', 'pending') // Only retry pending records
+        .or(`retry_count.is.null,retry_count.lt.3`) // Haven't exceeded max retries
+        .order('post_date', { ascending: false }) // Newer first
+        .limit(20);
+
+      if (error) {
+        throw new DatabaseError(`Failed to fetch retry candidates: ${error.message}`, { cause: error });
+      }
+
+      return data?.map(record => ({
+        id: record.id,
+        video_id: record.video_id,
+        channel_id: record.channel_id,
+        video_title: record.video_title,
+        retry_count: record.retry_count || 0,
+        last_retry_at: record.last_retry_at,
+        retry_reason: record.retry_reason,
+        post_date: record.post_date,
+        raw_transcript: record.raw_transcript,
+        hasTranscript: !!(record.raw_transcript && record.raw_transcript.trim().length >= 50)
+      })) || [];
+    } catch (error) {
+      logger.error('Error fetching records for retry', { error });
       throw error;
     }
   }

@@ -32,7 +32,7 @@ class FinfluencerTracker {
   async run(): Promise<void> {
     try {
       logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
-        version: '1.2.1',
+        version: '1.2.2',
         environment: config.timezone,
         model: config.openrouterModel
       });
@@ -292,7 +292,7 @@ class FinfluencerTracker {
     }
   }
 
-  // Process a single video
+  // Process a single video - FIXED: Now prioritizes RapidAPI for transcript retrieval
   private async processVideo(video: any, channel: any): Promise<void> {
     // Check if video already exists
     const exists = await supabaseService.videoExists(video.videoId);
@@ -305,46 +305,124 @@ class FinfluencerTracker {
     logger.info(`🔍 Processing video: ${video.title} (${video.videoId})`);
 
     try {
-      // Prefer captions-only retrieval: if youtubeService exposes getVideoCaptions, use it.
-      // Otherwise fall back to getVideoTranscript but we'll validate the result to avoid synthesized transcripts.
-      let transcriptResult: any;
-      if (typeof (youtubeService as any).getVideoCaptions === 'function') {
-        transcriptResult = await (youtubeService as any).getVideoCaptions(video.videoId, video.defaultLanguage);
-      } else {
-        transcriptResult = await youtubeService.getVideoTranscript(video.videoId, video.defaultLanguage);
+      // PREFER RAPIDAPI FOR TRANSCRIPTS: Try RapidAPI first (most reliable)
+      let transcriptText = '';
+      let transcriptSource = 'none';
+      let hasValidTranscript = false;
+
+      if (rapidapiService.isConfigured()) {
+        try {
+          logger.info(`🎯 [TIER 1] Fetching transcript from RapidAPI for video ${video.videoId}`);
+          transcriptText = await rapidapiService.getVideoTranscript(video.videoId);
+          hasValidTranscript = transcriptText && transcriptText.trim().length >= 50;
+          transcriptSource = 'rapidapi';
+          
+          if (hasValidTranscript) {
+            logger.info(`✅ [TIER 1 SUCCESS] RapidAPI transcript for video ${video.videoId} (${transcriptText.length} characters)`);
+          }
+        } catch (rapidapiError) {
+          logger.warn(`⚠️ [TIER 1 FAILED] RapidAPI failed for video ${video.videoId}: ${(rapidapiError as Error).message}`);
+          // Continue to fallback methods
+        }
       }
 
-      // Normalize transcript to a string (some implementations return { transcript, error })
-      const transcriptText: string = typeof transcriptResult === 'string'
-        ? transcriptResult
-        : (transcriptResult?.transcript ?? transcriptResult?.transcriptText ?? '');
+      // FALLBACK: Try YouTube native methods if RapidAPI failed
+      if (!hasValidTranscript) {
+        logger.info(`🔄 [TIER 2] Trying YouTube native methods for video ${video.videoId}`);
+        
+        try {
+          // Prefer captions-only retrieval: if youtubeService exposes getVideoCaptions, use it.
+          // Otherwise fall back to getVideoTranscript but we'll validate the result to avoid synthesized transcripts.
+          let transcriptResult: any;
+          if (typeof (youtubeService as any).getVideoCaptions === 'function') {
+            transcriptResult = await (youtubeService as any).getVideoCaptions(video.videoId, video.defaultLanguage);
+          } else {
+            transcriptResult = await youtubeService.getVideoTranscript(video.videoId, video.defaultLanguage);
+          }
 
-      // Heuristic validation: only accept transcripts that look like real captions/subtitles.
-      // Reject very short results or ones that look like metadata-only (title/description synthesis).
-      const isValidTranscript = (text: string) => {
-        if (!text) return false;
-        const trimmed = text.trim();
-        if (trimmed.length < 50) return false; // too short to be a real transcript
-        // prefer transcripts with line breaks (common in captions) or enough words
-        if (trimmed.includes('\n') || trimmed.split(/\s+/).length > 20) return true;
-        return false;
-      };
+          // Normalize transcript to a string (some implementations return { transcript, error })
+          transcriptText = typeof transcriptResult === 'string'
+            ? transcriptResult
+            : (transcriptResult?.transcript ?? transcriptResult?.transcriptText ?? '');
 
-      if (!isValidTranscript(transcriptText)) {
-        // No usable captions available. Create a record so the video is not missed,
-        // but do NOT attempt to synthesize a transcript from title/description.
-        logger.warn(`No usable captions found for video ${video.videoId}. Creating fallback record (no transcript).`);
-        await supabaseService.insertPrediction({
-          channel_id: channel.channel_id,
-          channel_name: channel.channel_name,
-          video_id: video.videoId,
-          video_title: video.video_title,
-          post_date: video.publishedAt ? video.publishedAt.split('T')[0] : new Date().toISOString().split('T')[0],
-          language: 'unknown',
-          transcript_summary: 'No subtitles/captions available',
+          // Heuristic validation: only accept transcripts that look like real captions/subtitles.
+          // Reject very short results or ones that look like metadata-only (title/description synthesis).
+          const isValidTranscript = (text: string) => {
+            if (!text) return false;
+            const trimmed = text.trim();
+            if (trimmed.length < 50) return false; // too short to be a real transcript
+            // prefer transcripts with line breaks (common in captions) or enough words
+            if (trimmed.includes('\n') || trimmed.split(/\s+/).length > 20) return true;
+            return false;
+          };
+
+          hasValidTranscript = isValidTranscript(transcriptText);
+          transcriptSource = hasValidTranscript ? 'youtube_native' : 'youtube_invalid';
+          
+          if (hasValidTranscript) {
+            logger.info(`✅ [TIER 2 SUCCESS] YouTube native transcript for video ${video.videoId} (${transcriptText.length} characters)`);
+          }
+        } catch (youtubeError) {
+          logger.warn(`⚠️ [TIER 2 FAILED] YouTube native methods failed for video ${video.videoId}: ${(youtubeError as Error).message}`);
+        }
+      }
+
+      // FALLBACK 2: Try Supadata services if available
+      if (!hasValidTranscript) {
+        logger.info(`🔄 [TIER 3] Trying Supadata services for video ${video.videoId}`);
+        
+        // Try Supadata RapidAPI first
+        if (supadataRapidAPIService.isConfigured()) {
+          try {
+            const supadataResult: any = await supadataRapidAPIService.getVideoTranscript(video.videoId);
+            if (supadataResult && typeof supadataResult === 'object' && 'transcript' in supadataResult) {
+              transcriptText = supadataResult.transcript;
+              hasValidTranscript = transcriptText && transcriptText.trim().length >= 50;
+              transcriptSource = 'supadata_rapidapi';
+              logger.info(`✅ [TIER 3A SUCCESS] Supadata RapidAPI transcript for video ${video.videoId} (${transcriptText.length} characters)`);
+            }
+          } catch (supadataRapidError) {
+            logger.warn(`⚠️ [TIER 3A FAILED] Supadata RapidAPI failed for video ${video.videoId}: ${(supadataRapidError as Error).message}`);
+          }
+        }
+
+        // Try Supadata direct if RapidAPI variant failed
+        if (!hasValidTranscript && supadataService.isConfigured()) {
+          try {
+            const supadataResult: any = await supadataService.getVideoTranscript(video.videoId);
+            if (supadataResult && typeof supadataResult === 'object' && 'transcript' in supadataResult) {
+              transcriptText = supadataResult.transcript;
+              hasValidTranscript = transcriptText && transcriptText.trim().length >= 50;
+              transcriptSource = 'supadata_direct';
+              logger.info(`✅ [TIER 3B SUCCESS] Supadata Direct transcript for video ${video.videoId} (${transcriptText.length} characters)`);
+            }
+          } catch (supadataDirectError) {
+            logger.warn(`⚠️ [TIER 3B FAILED] Supadata Direct failed for video ${video.videoId}: ${(supadataDirectError as Error).message}`);
+          }
+        }
+      }
+
+      // If we still don't have a valid transcript, record as pending
+      if (!hasValidTranscript) {
+        logger.warn(`❌ [NO TRANSCRIPT] No usable transcript found for video ${video.videoId} from any source. Recording as pending.`);
+        
+        await supabaseService.recordVideoAnalysis({
+          videoId: video.videoId,
+          channelId: channel.channel_id,
+          channelName: channel.channel_name,
+          videoTitle: video.title,
+          postDate: video.publishedAt ? video.publishedAt.split('T')[0] : new Date().toISOString().split('T')[0],
+          transcriptSummary: 'No subtitles/captions available from any service',
           predictions: [],
-          ai_modifications: []
+          aiModifications: [],
+          language: 'unknown',
+          rawTranscript: null,
+          hasTranscript: false,
+          aiAnalysisSuccess: false,
+          hasFinancialContent: true, // Don't know yet, but assume it could be
+          context: { isRetry: false }
         });
+        
         this.stats.videos_without_captions = (this.stats.videos_without_captions || 0) + 1;
         return;
       }
@@ -354,6 +432,7 @@ class FinfluencerTracker {
       let analysisSuccess = false;
       
       try {
+        logger.info(`🧠 Starting AI analysis for video ${video.videoId} (source: ${transcriptSource})`);
         analysis = await globalAIAnalyzer.analyzeTranscript(transcriptText, {
           videoId: video.videoId,
           title: video.title,
@@ -399,29 +478,40 @@ class FinfluencerTracker {
         analysisSuccess = false;
       }
 
-      // Determine subject outcome based on analysis success:
-      // - "analyzed" when we have a valid AI result (even if predictions are empty),
-      // - "pending" only when AI analysis failed/invalid and should be retried.
-      const subjectOutcome = analysisSuccess ? 'analyzed' : 'pending';
-      const shouldRetry = !analysisSuccess;
-
-      if (shouldRetry) {
-        logger.info(`📝 Marking video ${video.videoId} as pending for retry (analysis failed/invalid)`);
+      // Determine financial content status based on analysis
+      let hasFinancialContent = true;
+      let finalSummary = analysis?.transcript_summary || 'Analysis completed';
+      
+      if (analysis) {
+        // Check if this appears to be non-financial content
+        const summaryLower = (analysis.transcript_summary || '').toLowerCase();
+        const isOutOfSubject = summaryLower.includes('out of subject') || 
+                              summaryLower.includes('no financial') ||
+                              summaryLower.includes('not financial') ||
+                              summaryLower.includes('does not appear to be financial');
+        
+        if (isOutOfSubject) {
+          hasFinancialContent = false;
+          finalSummary = analysis.transcript_summary;
+        }
       }
 
-      // Save to database with appropriate status
-      await supabaseService.insertPrediction({
-        channel_id: channel.channel_id,
-        channel_name: channel.channel_name,
-        video_id: video.videoId,
-        video_title: video.title,
-        post_date: video.publishedAt.split('T')[0],
-        language: analysis?.language || 'unknown',
-        transcript_summary: analysis?.transcript_summary || (shouldRetry ? 'Analysis failed - marked for retry' : 'No analysis available'),
+      // CRITICAL FIX: Save to database using the unified method with proper parameters
+      await supabaseService.recordVideoAnalysis({
+        videoId: video.videoId,
+        channelId: channel.channel_id,
+        channelName: channel.channel_name,
+        videoTitle: video.title,
+        postDate: video.publishedAt.split('T')[0],
+        transcriptSummary: finalSummary,
         predictions: analysis?.predictions || [],
-        ai_modifications: analysis?.ai_modifications || [],
-        raw_transcript: transcriptText, // Add raw transcript storage
-        subject_outcome: subjectOutcome // Smart status: 'analyzed' if successful, 'pending' for retry
+        aiModifications: analysis?.ai_modifications || [],
+        language: analysis?.language || 'unknown',
+        rawTranscript: transcriptText, // CRITICAL: Always save raw transcript when available
+        hasTranscript: true, // We have a valid transcript
+        aiAnalysisSuccess: analysisSuccess,
+        hasFinancialContent: hasFinancialContent,
+        context: { isRetry: false }
       });
 
       // Update channel last_checked_at immediately after successful video processing
@@ -431,28 +521,39 @@ class FinfluencerTracker {
       }
 
       logger.info(`✅ Successfully processed video: ${video.videoId}`, {
+        transcriptSource: transcriptSource,
+        transcriptLength: transcriptText.length,
         predictionsFound: analysis?.predictions?.length || 0,
         modifications: analysis?.ai_modifications?.length || 0,
-        status: subjectOutcome,
-        needsRetry: shouldRetry
+        hasFinancialContent: hasFinancialContent,
+        hasRawTranscript: true,
+        analysisSuccess: analysisSuccess
       });
       this.stats.videos_with_captions = (this.stats.videos_with_captions || 0) + 1;
     } catch (error) {
       logger.error(`Failed to process video ${video.videoId}`, { error });
       
-      // Create a basic record even if analysis fails
+      // Create a fallback record even if processing fails - use unified method
       try {
-        await supabaseService.insertPrediction({
-          channel_id: channel.channel_id,
-          channel_name: channel.channel_name,
-          video_id: video.videoId,
-          video_title: video.title,
-          post_date: video.publishedAt ? video.publishedAt.split('T')[0] : new Date().toISOString().split('T')[0],
-          language: 'unknown',
-          transcript_summary: `Processing failed: ${(error as Error).message}`,
+        await supabaseService.recordVideoAnalysis({
+          videoId: video.videoId,
+          channelId: channel.channel_id,
+          channelName: channel.channel_name,
+          videoTitle: video.title,
+          postDate: video.publishedAt ? video.publishedAt.split('T')[0] : new Date().toISOString().split('T')[0],
+          transcriptSummary: `Processing failed: ${(error as Error).message}`,
           predictions: [],
-          ai_modifications: [],
-          subject_outcome: 'pending' // Mark for retry
+          aiModifications: [],
+          language: 'unknown',
+          rawTranscript: null,
+          hasTranscript: false,
+          aiAnalysisSuccess: false,
+          hasFinancialContent: true, // Could be financial, we just failed to process
+          context: { 
+            isRetry: true, 
+            retryAttemptNumber: 1,
+            errorMessage: (error as Error).message
+          }
         });
       } catch (dbError) {
         logger.error(`Failed to create fallback record for video ${video.videoId}`, { error: dbError });
