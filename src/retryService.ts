@@ -100,7 +100,7 @@ export class RetryService {
   // Get records that need retry (newer first, with empty predictions, excluding out-of-subject)
   private async getRecordsNeedingRetry(): Promise<RetryRecord[]> {
     try {
-      const { data, error } = await supabaseService.getClient()
+      let query = supabaseService.getClient()
         .from('finfluencer_predictions')
         .select(`
           id,
@@ -118,7 +118,22 @@ export class RetryService {
         .eq('predictions', '[]')
         .or(`retry_count.is.null,retry_count.lt.${this.MAX_RETRY_ATTEMPTS}`)
         // KEY: Exclude videos marked as out_of_subject
-        .neq('subject_outcome', 'out_of_subject')
+        .neq('subject_outcome', 'out_of_subject');
+
+      // OPTIMIZATION: Only retry videos from currently active channels
+      // This prevents wasting resources on channels we no longer track
+      try {
+        const activeChannels = await supabaseService.getActiveChannels();
+        const activeChannelIds = activeChannels.map(c => c.channel_id);
+        
+        if (activeChannelIds.length > 0) {
+          query = query.in('channel_id', activeChannelIds);
+        }
+      } catch (channelError) {
+        logger.warn('Failed to filter by active channels, proceeding with all channels', { error: channelError });
+      }
+
+      const { data, error } = await query
         .order('post_date', { ascending: false }) // Newer first
         .limit(15); // Reduced from 30 to 15 for better control
 
@@ -335,14 +350,14 @@ export class RetryService {
       if (!hasValidPredictions) {
         // This is key: Don't mark as out of subject just because no predictions were extracted
         // Instead, update the record but mark it as analyzed so it won't be retried
-        logger.info(`📋 Financial content detected but no specific predictions for video ${record.video_id}, marking as analyzed`);
+        logger.info(`📋 Financial content detected but no specific predictions for video ${record.video_id}, marking as out_of_subject`);
         await supabaseService.updatePredictionWithRetry(record.id, {
           transcript_summary: analysis.transcript_summary,
-          predictions: [], // Keep empty but mark as analyzed
+          predictions: [], // Keep empty
           ai_modifications: analysis.ai_modifications,
           language: analysis.language,
           raw_transcript: transcriptText, // Update/save the transcript we used
-          subject_outcome: 'analyzed'
+          subject_outcome: 'out_of_subject'
         });
         
         return {

@@ -13,3 +13,5 @@ coverage/
 *.swo
 *~
 MD_FILES/
+migrations/
+scripts/

@@ -16,6 +16,11 @@ export class SupabaseService {
     });
   }
 
+  // Expose client for direct query operations when needed
+  get supabase(): SupabaseClient {
+    return this.client;
+  }
+
   // Test database connection
   async testConnection(): Promise<boolean> {
     try {
@@ -91,6 +96,25 @@ export class SupabaseService {
       logger.debug(`Updated last_checked_at for channel ${channelId} with video date ${latestVideoDate}`);
     } catch (error) {
       logger.error(`Error updating channel ${channelId} with video date`, { error });
+      throw error;
+    }
+  }
+
+  // Update channel info (snippet, statistics)
+  async updateChannelInfo(channelId: string, info: any): Promise<void> {
+    try {
+      const { error } = await this.client
+        .from('finfluencer_channels')
+        .update({ channel_info: info })
+        .eq('channel_id', channelId);
+
+      if (error) {
+        throw new DatabaseError(`Failed to update channel info: ${error.message}`, { cause: error });
+      }
+
+      logger.info(`Updated channel info for ${channelId}`);
+    } catch (error) {
+      logger.error(`Error updating channel info for ${channelId}`, { error });
       throw error;
     }
   }

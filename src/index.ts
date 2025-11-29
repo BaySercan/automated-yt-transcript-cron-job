@@ -6,6 +6,7 @@ import { rapidapiService } from './rapidapi';
 import { supadataService } from './supadataService';
 import { supadataRapidAPIService } from './supadataRapidAPIService';
 import { retryService } from './retryService';
+import { combinedPredictionsService } from './combinedPredictionsService';
 import { logger, setupGracefulShutdown, getMemoryUsage, parseYouTubeDuration } from './utils';
 import { CronJobStats } from './types';
 import { ConfigurationError } from './errors';
@@ -48,6 +49,9 @@ class FinfluencerTracker {
 
       // Process failed predictions (idle-time retry)
       await this.processFailedPredictions();
+
+      // Process combined predictions (AI enrichment + price data)
+      await this.processCombinedPredictions();
 
       // Log final statistics
       this.logFinalStats();
@@ -166,6 +170,24 @@ class FinfluencerTracker {
 
     logger.info(`📺 Found ${channels.length} active channels to process`);
 
+    // FIRST: Update metadata for ALL active channels
+    logger.info('🔄 Updating channel metadata for all active channels...');
+    for (const channel of channels) {
+      if (this.isShuttingDown) break;
+      try {
+        const details = await youtubeService.getChannelDetails(channel.channel_id);
+        if (details.raw) {
+          await supabaseService.updateChannelInfo(channel.channel_id, details.raw);
+        }
+      } catch (err) {
+        logger.warn(`Failed to update metadata for channel ${channel.channel_name}`, { error: (err as Error).message });
+        // Continue to next channel, don't stop processing
+      }
+      // Small delay to respect rate limits
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    logger.info('✅ Channel metadata update completed');
+
     for (const channel of channels) {
       if (this.isShuttingDown) {
         logger.info('Shutdown requested, stopping channel processing');
@@ -216,6 +238,46 @@ class FinfluencerTracker {
       logger.error('❌ Retry processing failed', { error });
       this.stats.errors++;
       // Don't throw - retry failures shouldn't stop the main process
+    }
+  }
+
+  // Process combined predictions with AI enrichment and price data
+  private async processCombinedPredictions(): Promise<void> {
+    try {
+      logger.info('🔀 Starting combined predictions processing');
+      
+      const result = await combinedPredictionsService.processPredictions({
+        limit: 500,
+        skipPrice: false,
+        dryRun: false,
+        concurrency: 3,
+        retryCount: 3,
+        enableAIAnalysis: false,
+        requestId: `cron_${Date.now()}`
+      });
+
+      logger.info('✅ Combined predictions processing completed', {
+        processedRecords: result.processed_records,
+        inserted: result.inserted,
+        skipped: result.skipped,
+        errors: result.errors,
+        pricesFetched: result.prices_fetched,
+        requestId: result.request_id
+      });
+
+      // Update statistics
+      this.stats.processed_videos += result.inserted; // Count newly inserted predictions
+      
+      // After inserting combined predictions, reconcile horizon-passed records (no AI by default)
+      try {
+        await combinedPredictionsService.reconcilePredictions({ limit: 500, dryRun: false, retryCount: 3, useAI: false, requestId: `reconcile_${Date.now()}` });
+      } catch (err) {
+        logger.warn('Failed to reconcile combined predictions', { error: err });
+      }
+    } catch (error) {
+      logger.error('❌ Combined predictions processing failed', { error });
+      this.stats.errors++;
+      // Don't throw - this shouldn't stop the main process
     }
   }
 

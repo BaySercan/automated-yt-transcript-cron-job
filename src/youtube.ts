@@ -51,6 +51,7 @@ export class YouTubeService {
     publishedAt: string;
     subscriberCount?: number;
     videoCount?: number;
+    raw?: any;
   }> {
     if (!isValidYouTubeChannelId(channelId)) {
       throw new YouTubeServiceError(`Invalid channel ID format: ${channelId}`);
@@ -82,7 +83,12 @@ export class YouTubeService {
         description: snippet?.description,
         publishedAt: snippet?.publishedAt || new Date().toISOString(),
         subscriberCount: statistics?.subscriberCount ? parseInt(statistics.subscriberCount) : undefined,
-        videoCount: statistics?.videoCount ? parseInt(statistics.videoCount) : undefined
+        videoCount: statistics?.videoCount ? parseInt(statistics.videoCount) : undefined,
+        // Return full raw info for storage
+        raw: {
+          snippet,
+          statistics
+        }
       };
     } catch (error) {
       if (error instanceof YouTubeServiceError) {

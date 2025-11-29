@@ -1,4 +1,4 @@
-# Automated YouTube Transcript Generator v1.1.12
+# Automated YouTube Transcript Generator v1.2.6
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
@@ -26,39 +26,75 @@ The cron job automatically:
 - **⚡ Performance Optimized**: Memory-efficient processing with adaptive polling
 - **🎯 Transcript Validation**: Heuristic validation to ensure real captions/subtitles
 
+- **🔁 Ticker Normalization**: Curated mapping + AI fallback to resolve ambiguous asset names to exchange-qualified tickers
+- **📉 Smart Price API Fallback**: Multi-provider price fetching (AlphaVantage → Finnhub → TwelveData → Yahoo) with per-provider rate-limit detection and automatic cascading
+
 ## 🛠️ Tech Stack
 
 - **Language**: TypeScript (Node.js 20+)
+- **Framework**: Next.js 14+ (for web interface components)
+- **Styling**: Tailwind CSS (utility-first CSS framework)
 - **Scheduler**: Northflank Cron Job (daily at 23:30)
 - **Database**: Supabase (PostgreSQL)
 - **AI Provider**: OpenRouter API (for transcript analysis)
+- **Supabase AI**: Supabase AI service for enhanced analysis capabilities
 - **YouTube API**: YouTube Data API v3 + RapidAPI (for transcript retrieval)
 - **Transcript Provider**: RapidAPI (youtube-multi-api service)
-- **Deployment**: Docker
+ - **Price APIs**: AlphaVantage, Finnhub, TwelveData, Yahoo Finance (multi-provider fallback for historical prices)
+ - **Deployment**: Docker
 - **Configuration**: Environment variables
 
 ## 📁 Project Structure
 
-```
+```bash
 /src
- ├─ index.ts             # Main FinfluencerTracker class with cron logic
- ├─ youtube.ts           # YouTube Data API v3 service
- ├─ rapidapi.ts          # RapidAPI transcript service
- ├─ analyzer.ts          # AI analysis using OpenRouter
- ├─ supabase.ts          # Database operations and health checks
- ├─ types.ts             # TypeScript interfaces and types
- ├─ utils.ts             # Logging, retries, JSON validation, utilities
- ├─ config.ts            # Environment configuration and validation
- ├─ errors.ts            # Custom error classes
- ├─ retryService.ts      # Automatic retry service for failed predictions
- ├─ jsonUtils.ts         # JSON parsing and validation utilities
- └─ version.ts           # Version management and build information
+ ├─ index.ts                     # Main FinfluencerTracker class with cron logic
+ ├─ youtube.ts                   # YouTube Data API v3 service
+ ├─ rapidapi.ts                  # RapidAPI transcript service
+ ├─ enhancedAnalyzer.ts          # AI analysis using OpenRouter with Supabase AI integration
+ ├─ supabase.ts                  # Database operations and health checks
+ ├─ supadataService.ts           # Supabase AI service for transcript analysis
+ ├─ supadataRapidAPIService.ts   # Supabase AI service for RapidAPI integration
+ ├─ types.ts                     # TypeScript interfaces and types
+ ├─ utils.ts                     # Logging, retries, JSON validation, utilities
+ ├─ config.ts                    # Environment configuration and validation
+ ├─ errors.ts                    # Custom error classes
+ ├─ retryService.ts              # Automatic retry service for failed predictions
+ ├─ combinedPredictionsService.ts # Combines predictions, fetches prices, AI enrichment
+ ├─ tickerNormalizationService.ts # Normalizes asset names to tickers (mapping + AI fallback)
+ ├─ tickerMapping.json           # Curated mapping of common asset names → tickers
+ ├─ scripts/run-dry-run.ts       # Consolidated dry-run script (CLI)
+ ├─ migrations/001_add_prediction_fields.sql # SQL migration for combined_predictions fields
+ ├─ jsonUtils.ts                 # JSON parsing and validation utilities
+ └─ version.ts                   # Version management and build information
 ```
 
 Additional files:
+
+### Table 3 — `combined_predictions`
+
+This table stores enriched predictions after normalization, price fetching and optional AI enrichment. A SQL migration is included at `migrations/001_add_prediction_fields.sql` to add the fields described below.
+
+| Column                         | Type        | Description |
+| ------------------------------ | ----------- | ----------- |
+| id                             | uuid (pk)   | Auto-generated UUID |
+| video_id                       | text        | YouTube video ID |
+| asset                          | text        | Asset string as extracted from prediction |
+| suggested_ticker               | varchar     | Normalized ticker suggested by service |
+| suggested_ticker_confidence    | numeric     | Confidence score (0.00 - 1.00) |
+| asset_entry_price              | numeric     | Historical price at post date |
+| target_price                   | numeric     | Target price parsed from prediction |
+| horizon_value                  | text/date   | Horizon value or date string |
+| status                         | varchar     | pending | correct | wrong | inconclusive |
+| actual_price                   | numeric     | Price at horizon (for reconciliation) |
+| resolved_at                    | timestamp   | When reconciliation was performed |
+| ai_analysis                    | text        | AI enrichment JSON/text |
+| created_at                     | timestamp   | Default now() |
+
+To apply the migration locally or in your environment, run the SQL in `migrations/001_add_prediction_fields.sql` against your Supabase/Postgres instance.
+
 ```
-retry-service-documentation.md  # Comprehensive retry service docs
-update-docker-versioned.ps1     # Docker version update script
+update-docker-versioned.ps1       # Docker version update script
 ```
 
 ## 🗄️ Database Schema
@@ -143,6 +179,11 @@ SUPABASE_SERVICE_KEY=your_supabase_service_role_key_here
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 OPENROUTER_MODEL=your_preferred_model
 
+# Price API Keys (used for historical price fetching and fallbacks)
+ALPHA_VANTAGE_API_KEY=your_alphavantage_api_key_here
+FINNHUB_API_KEY=your_finnhub_api_key_here
+TWELVE_DATA_API_KEY=your_twelvedata_api_key_here
+
 # RapidAPI Configuration (YouTube Transcript Service)
 RAPIDAPI_HOST=youtube-multi-api.p.rapidapi.com
 RAPIDAPI_KEY=your_rapidapi_key_here
@@ -197,30 +238,42 @@ npm run build
 npm start
 ```
 
+### Running Dry-Run (local testing)
+
+Use the consolidated dry-run script to test processing locally. Examples:
+
+```bash
+# Quick single-record test (fetches prices by default)
+npx ts-node -T scripts/run-dry-run.ts --limit 1
+
+# Default test (10 records)
+npx ts-node -T scripts/run-dry-run.ts
+
+# AI-enabled run (slower, more thorough)
+npx ts-node -T scripts/run-dry-run.ts --enable-ai --limit 5
+
+# AI-only analysis (skip price fetching)
+npx ts-node -T scripts/run-dry-run.ts --skip-price --limit 10
+```
+
 ## 🐳 Docker Deployment
 
 ### Build Docker Image
 
 ```bash
-docker build -t finfluencer-tracker:v1.1.12 .
+docker build -t finfluencer-tracker:v1.2.6 .
 ```
 
 ### Run with Environment File
 
 ```bash
-docker run --env-file .env finfluencer-tracker:v1.1.12
+docker run --env-file .env finfluencer-tracker:v1.2.6
 ```
 
 ### Run in Background
 
 ```bash
-docker run -d --name finfluencer-tracker --env-file .env finfluencer-tracker:v1.1.12
-```
-
-### Update to Latest Version
-
-```bash
-update-docker-versioned.ps1
+docker run -d --name finfluencer-tracker --env-file .env finfluencer-tracker:v1.2.6
 ```
 
 ## 🌐 Northflank Deployment
@@ -553,7 +606,7 @@ npm start
 
 ### Version Management
 
-The project uses semantic versioning (v1.1.12):
+The project uses semantic versioning (v1.2.6):
 - **Major**: Breaking changes
 - **Minor**: New features, backwards compatible
 - **Patch**: Bug fixes, backwards compatible
@@ -561,12 +614,27 @@ The project uses semantic versioning (v1.1.12):
 ### Documentation Updates
 
 - Update `README.md` for user-facing changes
-- Update `retry-service-documentation.md` for retry service changes
 - Update `src/version.ts` for version information
 
 ## 📚 Additional Documentation
 
-- **[Retry Service Documentation](retry-service-documentation.md)**: Detailed documentation about the retry service implementation, configuration, and troubleshooting
+### Enhanced Analyzer Features
+
+The `enhancedAnalyzer.ts` provides advanced AI analysis capabilities with Supabase AI integration:
+
+- **Multi-Model Support**: Seamless switching between OpenRouter and Supabase AI models
+- **Contextual Analysis**: Enhanced prompt engineering for financial prediction accuracy
+- **Error Correction**: Automatic validation and correction of AI-generated predictions
+- **Batch Processing**: Efficient analysis of multiple transcripts with rate limiting
+
+### Supabase AI Services
+
+The `supadataService.ts` and `supadataRapidAPIService.ts` modules provide:
+
+- **Supabase AI Integration**: Direct access to Supabase's AI inference capabilities
+- **Vector Embeddings**: Advanced semantic analysis of financial content
+- **Custom Prompts**: Tailored prompt templates for financial prediction extraction
+- **Fallback Mechanisms**: Automatic fallback to OpenRouter when Supabase AI is unavailable
 
 ## 📄 License
 
@@ -591,16 +659,18 @@ For issues and questions:
 4. Check API service status
 5. Consult the retry service documentation
 
-## 🔄 Recent Updates (v1.1.12)
+## 🔄 Recent Updates (v1.2.6)
 
-- ✨ **New Retry Service**: Automatic recovery mechanism for failed predictions
-- 📊 **Enhanced Error Handling**: Sophisticated retry logic with batch processing
-- 🔧 **Configuration Updates**: New retry-related environment variables
-- 📝 **Documentation**: Comprehensive retry service documentation
-- 🎯 **Performance Improvements**: Idle-time processing optimization
-- 🛡️ **Transcript Validation**: Heuristic validation to ensure real captions
-- 📈 **Statistics Tracking**: Comprehensive CronJobStats with memory monitoring
-- 🔄 **Database Health Checks**: New health check service methods
+- ✨ **Enhanced Analyzer**: Advanced AI analysis with Supabase AI integration
+- 🚀 **Supabase AI Services**: New modules for Supabase AI inference capabilities
+- 🔧 **Multi-Model Support**: Seamless switching between OpenRouter and Supabase AI
+- 📊 **Vector Embeddings**: Advanced semantic analysis for financial content
+- 🎯 **Performance Optimizations**: Improved batch processing and rate limiting
+- 🛡️ **Enhanced Error Handling**: Sophisticated retry logic with smart fallbacks
+- 📈 **Advanced Statistics**: Comprehensive monitoring with memory usage tracking
+- 🔄 **Intelligent Retry Service**: Automatic recovery with priority processing
+- 🎨 **Next.js & Tailwind CSS**: Modern web framework integration for UI components
+- 📝 **Updated Documentation**: Comprehensive guides for new features and services
 
 ---
 
