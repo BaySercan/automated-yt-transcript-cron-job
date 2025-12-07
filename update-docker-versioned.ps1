@@ -8,6 +8,8 @@
 #   .\update-docker-versioned.ps1 -CleanupOnly    # Just cleanup old images
 #   .\update-docker-versioned.ps1 -Help           # Show help
 
+#MOST USED COMMAND: .\update-docker-versioned.ps1 -Version patch -SkipTest 
+
 param(
     [Parameter(HelpMessage="Version tag (e.g., v1.1.0) or bump type (major, minor, patch)")]
     [string]$Version,
