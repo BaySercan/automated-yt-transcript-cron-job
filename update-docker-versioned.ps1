@@ -42,6 +42,8 @@ $ENV_FILE = ".env"
 $PACKAGE_JSON = "package.json"
 $VERSION_FILE = "src/version.ts"
 $INDEX_FILE = "src/index.ts"
+$README_FILE = "README.md"
+$REPORTING_FILE = "src/services/reportingService.ts"
 
 # Colors for PowerShell output
 $RED = "Red"
@@ -174,7 +176,7 @@ function Update-PackageJson {
 function Update-IndexTs {
     param([string]$NewVersion)
     
-    $NewVersion = $NewVersion -replace '^v', ''  # Remove v prefix for package.json
+    $NewVersion = $NewVersion -replace '^v', ''  
     
     if (Test-Path $INDEX_FILE) {
         Write-LogInfo "Updating src/index.ts version to $NewVersion"
@@ -182,16 +184,55 @@ function Update-IndexTs {
         
         # Target the specific logger.info line with exact context
         # logger.info('🚀 Starting Finfluencer Tracker Cron Job', {
-        #   version: '1.1.5',
-        #   environment: config.timezone,
-        #   model: config.openrouterModel
-        # });
-        $updatedContent = $content -replace "(?<=logger\.info\([^)]*version:\s*)'[^']*'", "'$NewVersion'"
+        #   version: '1.1.5', ...
+        # Updated regex to handle both single and double quotes
+        $updatedContent = $content -replace "(?<=logger\.info\([^)]*version:\s*)['`"][^'`"]*['`"]", "`"$NewVersion`""
         
         Set-Content -Path $INDEX_FILE -Value $updatedContent -NoNewline
         Write-LogSuccess "Updated src/index.ts"
     } else {
         Write-LogWarning "src/index.ts not found, skipping update"
+    }
+}
+
+function Update-ReportingService {
+    param([string]$NewVersion)
+    
+    $NewVersion = $NewVersion -replace '^v', ''
+    
+    if (Test-Path $REPORTING_FILE) {
+        Write-LogInfo "Updating src/services/reportingService.ts version to $NewVersion"
+        $content = Get-Content $REPORTING_FILE -Raw
+        
+        # Update APP_VERSION = "2.0.0"
+        $updatedContent = $content -replace "(?<=private readonly APP_VERSION = )['`"][^'`"]*['`"]", "`"$NewVersion`""
+        
+        Set-Content -Path $REPORTING_FILE -Value $updatedContent -NoNewline
+        Write-LogSuccess "Updated src/services/reportingService.ts"
+    } else {
+        Write-LogWarning "src/services/reportingService.ts not found, skipping update"
+    }
+}
+
+function Update-Readme {
+    param([string]$NewVersion)
+
+    $NewVersion = $NewVersion -replace '^v', ''
+
+    if (Test-Path $README_FILE) {
+        Write-LogInfo "Updating README.md version to $NewVersion"
+        $content = Get-Content $README_FILE -Raw
+        
+        # 1. Update Header: # Automated YouTube Transcript Generator v...
+        $content = $content -replace "(?<=^# Automated YouTube Transcript Generator v)[0-9]+\.[0-9]+\.[0-9]+", "$NewVersion"
+        
+        # 2. Update Recent Updates Header: ## 🔄 Recent Updates (v...)
+        $content = $content -replace "(?<=## 🔄 Recent Updates \(v)[0-9]+\.[0-9]+\.[0-9]+(?=\))", "$NewVersion"
+
+        Set-Content -Path $README_FILE -Value $content -NoNewline
+        Write-LogSuccess "Updated README.md"
+    } else {
+         Write-LogWarning "README.md not found, skipping update"
     }
 }
 
@@ -274,12 +315,12 @@ function Push-ToGit {
     param([string]$Version)
     
     $gitStatus = git rev-parse --git-dir 2>$null
-    <# if ($gitStatus) {
+    if ($gitStatus) {
         Write-LogInfo "Pushing to Git"
         git push origin 2>$null
         git push origin $Version 2>$null
         Write-LogSuccess "Pushed to Git"
-    } #>
+    }
 }
 
 function Test-EnvFile {
@@ -492,6 +533,8 @@ function Main {
         Update-PackageJson -NewVersion $actualVersion
         Update-VersionTs -NewVersion $actualVersion
         Update-IndexTs -NewVersion $actualVersion
+        Update-ReportingService -NewVersion $actualVersion
+        Update-Readme -NewVersion $actualVersion
         
         if (-not $NoGit) {
             Save-Changes -Version $actualVersion
@@ -548,7 +591,7 @@ function Main {
     if (-not $NoGit -and -not $SkipPublish) {
         Write-LogInfo "DockerHub: $IMAGE_NAME`:$actualVersion"
     }
-    Write-LogInfo "Updated files: package.json, src/version.ts, src/index.ts"
+    Write-LogInfo "Updated files: package.json, src/version.ts, src/index.ts, src/services/reportingService.ts, README.md"
     
     if (-not $NoGit) {
         Write-Host ""

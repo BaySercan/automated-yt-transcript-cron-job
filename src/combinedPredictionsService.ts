@@ -1,8 +1,9 @@
-import axios from 'axios';
-import { config } from './config';
-import { logger } from './utils';
-import { supabaseService } from './supabase';
-import { priceService } from './services/priceService';
+import axios from "axios";
+import { config } from "./config";
+import { logger } from "./utils";
+import { supabaseService } from "./supabase";
+import { priceService } from "./services/priceService";
+import { reportingService } from "./services/reportingService";
 
 /**
  * Combined Predictions Service
@@ -15,7 +16,11 @@ export class CombinedPredictionsService {
   /**
    * Log structured logs similar to edge function
    */
-  private log(level: string, message: string, meta: Record<string, any> = {}): void {
+  private log(
+    level: string,
+    message: string,
+    meta: Record<string, any> = {}
+  ): void {
     logger[level as keyof typeof logger](message, meta);
   }
 
@@ -23,9 +28,9 @@ export class CombinedPredictionsService {
    * Format error messages safely
    */
   private safeErrorMessage(err: any): string {
-    if (!err) return 'Unknown error';
-    if (typeof err === 'string') return err;
-    if (typeof err === 'object') return err.message ?? JSON.stringify(err);
+    if (!err) return "Unknown error";
+    if (typeof err === "string") return err;
+    if (typeof err === "object") return err.message ?? JSON.stringify(err);
     return String(err);
   }
 
@@ -34,7 +39,7 @@ export class CombinedPredictionsService {
    */
   private formatDateForApi(dateStr: string): string {
     try {
-      return new Date(dateStr).toISOString().split('T')[0];
+      return new Date(dateStr).toISOString().split("T")[0];
     } catch {
       return dateStr;
     }
@@ -44,16 +49,22 @@ export class CombinedPredictionsService {
    * Normalize prediction text for deduplication
    */
   private normalizePredictionText(text: any): string {
-    if (!text) return '';
-    if (typeof text !== 'string') text = JSON.stringify(text);
-    return text.trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!text) return "";
+    if (typeof text !== "string") text = JSON.stringify(text);
+    return text.trim().replace(/\s+/g, " ").toLowerCase();
   }
 
   /**
    * Create normalized key for duplicate detection
    */
-  private createNormalizedKey(videoId: string, asset: string, text: string): string {
-    return `${videoId}::${(asset || '').toUpperCase().trim()}::${this.normalizePredictionText(text)}`;
+  private createNormalizedKey(
+    videoId: string,
+    asset: string,
+    text: string
+  ): string {
+    return `${videoId}::${(asset || "")
+      .toUpperCase()
+      .trim()}::${this.normalizePredictionText(text)}`;
   }
 
   /**
@@ -72,28 +83,30 @@ export class CombinedPredictionsService {
     details?: Record<string, any>;
   }): Promise<void> {
     try {
-      const { error } = await supabaseService.supabase.from('function_logs').insert({
-        function: entry.function,
-        event: entry.event,
-        processed: entry.processed ?? null,
-        inserted: entry.inserted ?? null,
-        skipped: entry.skipped ?? null,
-        errors: entry.errors ?? null,
-        prices_fetched: entry.prices_fetched ?? null,
-        runtime_ms: entry.runtime_ms ?? null,
-        request_id: entry.request_id ?? null,
-        details: entry.details ?? {},
-        created_at: new Date().toISOString()
-      });
+      const { error } = await supabaseService.supabase
+        .from("function_logs")
+        .insert({
+          function: entry.function,
+          event: entry.event,
+          processed: entry.processed ?? null,
+          inserted: entry.inserted ?? null,
+          skipped: entry.skipped ?? null,
+          errors: entry.errors ?? null,
+          prices_fetched: entry.prices_fetched ?? null,
+          runtime_ms: entry.runtime_ms ?? null,
+          request_id: entry.request_id ?? null,
+          details: entry.details ?? {},
+          created_at: new Date().toISOString(),
+        });
 
       if (error) {
-        this.log('warn', 'Telemetry insert failed', {
-          err: this.safeErrorMessage(error)
+        this.log("warn", "Telemetry insert failed", {
+          err: this.safeErrorMessage(error),
         });
       }
     } catch (err) {
-      this.log('warn', 'Telemetry insert unexpected error', {
-        err: this.safeErrorMessage(err)
+      this.log("warn", "Telemetry insert unexpected error", {
+        err: this.safeErrorMessage(err),
       });
     }
   }
@@ -102,14 +115,16 @@ export class CombinedPredictionsService {
    * Main processing function
    * Combines analyzed predictions, fetches prices, and stores in combined_predictions table
    */
-  async processPredictions(options: {
-    limit?: number;
-    skipPrice?: boolean;
-    dryRun?: boolean;
-    concurrency?: number;
-    retryCount?: number;
-    requestId?: string;
-  } = {}): Promise<{
+  async processPredictions(
+    options: {
+      limit?: number;
+      skipPrice?: boolean;
+      dryRun?: boolean;
+      concurrency?: number;
+      retryCount?: number;
+      requestId?: string;
+    } = {}
+  ): Promise<{
     request_id: string;
     processed_records: number;
     inserted: number;
@@ -117,7 +132,8 @@ export class CombinedPredictionsService {
     errors: number;
     prices_fetched: number;
   }> {
-    const requestId = options.requestId || crypto.randomUUID?.() || String(Date.now());
+    const requestId =
+      options.requestId || crypto.randomUUID?.() || String(Date.now());
     const start = Date.now();
 
     const limit = Math.max(1, Math.min(2000, options.limit || 500));
@@ -126,51 +142,63 @@ export class CombinedPredictionsService {
     const concurrency = options.concurrency || this.DEFAULT_CONCURRENCY;
     const retryCount = options.retryCount || this.DEFAULT_RETRY_COUNT;
 
-    this.log('info', 'Combined predictions processing started', {
+    this.log("info", "Combined predictions processing started", {
       requestId,
       limit,
       skipPrice,
       dryRun,
       concurrency,
-      retryCount
+      retryCount,
     });
 
     if (!dryRun) {
-      this.insertTelemetry({
-        function: 'combine_predictions',
-        event: 'started',
-        request_id: requestId,
-        details: {
-          limit,
-          skipPrice,
-          concurrency,
-          retryCount
-        }
-      }).catch((err) => {
-        this.log('warn', 'Failed to insert telemetry', { error: err });
-      });
+      // Log start - using new reportingService instead of function_logs telemetry
+      // insertTelemetry removed as function_logs table is being deprecated
     }
 
-    return this.executeProcessing(requestId, limit, skipPrice, dryRun, concurrency, retryCount, start);
+    return this.executeProcessing(
+      requestId,
+      limit,
+      skipPrice,
+      dryRun,
+      concurrency,
+      retryCount,
+      start
+    );
   }
 
   /**
    * Reconcile combined_predictions where the horizon date has passed.
    * Updates `status` to 'correct' or 'wrong' based on actual price vs target.
    */
-  async reconcilePredictions(options: { limit?: number; dryRun?: boolean; retryCount?: number; useAI?: boolean; requestId?: string } = {}): Promise<void> {
-    const requestId = options.requestId || crypto.randomUUID?.() || String(Date.now());
+  async reconcilePredictions(
+    options: {
+      limit?: number;
+      dryRun?: boolean;
+      retryCount?: number;
+      useAI?: boolean;
+      requestId?: string;
+    } = {}
+  ): Promise<void> {
+    const requestId =
+      options.requestId || crypto.randomUUID?.() || String(Date.now());
     const limit = options.limit ?? 500;
     const dryRun = options.dryRun ?? false;
 
-    this.log('info', 'Reconciling horizon-passed combined predictions', { requestId, limit, dryRun });
+    this.log("info", "Reconciling horizon-passed combined predictions", {
+      requestId,
+      limit,
+      dryRun,
+    });
 
     try {
       // Fetch pending predictions
       const { data: rows, error } = await supabaseService.supabase
-        .from('combined_predictions')
-        .select('id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, sentiment, status')
-        .eq('status', 'pending')
+        .from("combined_predictions")
+        .select(
+          "id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, sentiment, status"
+        )
+        .eq("status", "pending")
         .limit(limit);
 
       if (error) return;
@@ -179,22 +207,27 @@ export class CombinedPredictionsService {
 
       for (const row of rows || []) {
         try {
-          const symbol = row.asset || 'UNKNOWN';
+          const symbol = row.asset || "UNKNOWN";
           const postDate = new Date(row.post_date);
           // Calculate horizon date range
-          const horizonValue = row.horizon_value || '1 month';
-          const horizonType = row.horizon_type || 'custom';
-          const { start: horizonStart, end: horizonEnd } = priceService.calculateHorizonDateRange(postDate, horizonValue, horizonType);
-          
+          const horizonValue = row.horizon_value || "1 month";
+          const horizonType = row.horizon_type || "custom";
+          const { start: horizonStart, end: horizonEnd } =
+            priceService.calculateHorizonDateRange(
+              postDate,
+              horizonValue,
+              horizonType
+            );
+
           // If horizon start hasn't passed yet, skip
           if (now < horizonStart) {
             continue;
           }
 
-          this.log('info', `Checking horizon price for ${symbol}`, { 
-            horizonStart: horizonStart.toISOString(), 
+          this.log("info", `Checking horizon price for ${symbol}`, {
+            horizonStart: horizonStart.toISOString(),
             horizonEnd: horizonEnd.toISOString(),
-            rowId: row.id 
+            rowId: row.id,
           });
 
           let targetPriceNum: number | null = null;
@@ -211,61 +244,80 @@ export class CombinedPredictionsService {
 
           // If entry price is missing, try to fetch it now for the post_date
           if (entryPriceNum === null && !dryRun) {
-             const price = await priceService.searchPrice(symbol, postDate, row.asset_type);
-             if (price !== null) {
-               entryPriceNum = price;
-               
-               // Update the database immediately so we don't lose this found price
-               await supabaseService.supabase
-                 .from('combined_predictions')
-                 .update({ 
-                   asset_entry_price: String(price),
-                   updated_at: new Date().toISOString()
-                 })
-                 .eq('id', row.id);
-                 
-               this.log('info', `Found and updated missing entry price for ${symbol}`, { 
-                 id: row.id, 
-                 price: price 
-               });
-             }
-          }
+            const price = await priceService.searchPrice(
+              symbol,
+              postDate,
+              row.asset_type
+            );
+            if (price !== null) {
+              entryPriceNum = price;
 
+              // Update the database immediately so we don't lose this found price
+              await supabaseService.supabase
+                .from("combined_predictions")
+                .update({
+                  asset_entry_price: String(price),
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", row.id);
+
+              this.log(
+                "info",
+                `Found and updated missing entry price for ${symbol}`,
+                {
+                  id: row.id,
+                  price: price,
+                }
+              );
+            }
+          }
 
           // Verify prediction with range
-          const verificationResult = await priceService.verifyPredictionWithRange(
-            symbol,
-            entryPriceNum,
-            targetPriceNum,
-            row.sentiment || 'neutral',
-            horizonStart,
-            horizonEnd,
-            row.asset_type
-          );
+          const verificationResult =
+            await priceService.verifyPredictionWithRange(
+              symbol,
+              entryPriceNum,
+              targetPriceNum,
+              row.sentiment || "neutral",
+              horizonStart,
+              horizonEnd,
+              row.asset_type
+            );
 
-          if (verificationResult.status !== 'pending' && !dryRun) {
+          if (verificationResult.status !== "pending" && !dryRun) {
             await supabaseService.supabase
-              .from('combined_predictions')
-              .update({ 
-                status: verificationResult.status, 
-                actual_price: verificationResult.actualPrice, 
+              .from("combined_predictions")
+              .update({
+                status: verificationResult.status,
+                actual_price: verificationResult.actualPrice,
                 resolved_at: new Date().toISOString(),
-                verification_metadata: verificationResult.metDate ? { met_on_date: verificationResult.metDate.toISOString() } : {}
+                verification_metadata: verificationResult.metDate
+                  ? { met_on_date: verificationResult.metDate.toISOString() }
+                  : {},
               })
-              .eq('id', row.id);
-              
-            this.log('info', `Resolved prediction ${row.id} as ${verificationResult.status}`, { 
-              symbol, 
-              actualPrice: verificationResult.actualPrice,
-              metDate: verificationResult.metDate
-            });
+              .eq("id", row.id);
+
+            this.log(
+              "info",
+              `Resolved prediction ${row.id} as ${verificationResult.status}`,
+              {
+                symbol,
+                actualPrice: verificationResult.actualPrice,
+                metDate: verificationResult.metDate,
+              }
+            );
           }
         } catch (e) {
-          this.log('error', 'Error reconciling record', { err: this.safeErrorMessage(e), row });
+          this.log("error", "Error reconciling record", {
+            err: this.safeErrorMessage(e),
+            row,
+          });
         }
       }
     } catch (err) {
-      this.log('error', 'Unhandled error during reconciliation', { err: this.safeErrorMessage(err) });
+      this.log("error", "Unhandled error during reconciliation", {
+        err: this.safeErrorMessage(err),
+      });
     }
   }
 
@@ -297,34 +349,43 @@ export class CombinedPredictionsService {
     try {
       // Fetch unprocessed predictions for combining
       const { data: records, error } = await supabaseService.supabase
-        .from('finfluencer_predictions')
-        .select('*')
-        .eq('subject_outcome', 'analyzed')
-        .is('combined_processed_at', null)
-        .order('created_at', { ascending: false })
+        .from("finfluencer_predictions")
+        .select("*")
+        .eq("subject_outcome", "analyzed")
+        .is("combined_processed_at", null)
+        .order("created_at", { ascending: false })
         .limit(limit);
 
       if (error) {
-        throw new Error(`Failed to fetch predictions: ${this.safeErrorMessage(error)}`);
+        throw new Error(
+          `Failed to fetch predictions: ${this.safeErrorMessage(error)}`
+        );
       }
 
       // If no analyzed records found, try pending records with non-empty predictions
       let finalRecords = records || [];
       if (finalRecords.length === 0) {
-        this.log('info', 'No unprocessed analyzed records, checking pending records with predictions', { requestId });
-        
-        const { data: pendingWithPred, error: pendingErr } = await supabaseService.supabase
-          .from('finfluencer_predictions')
-          .select('*')
-          .eq('subject_outcome', 'pending')
-          .is('combined_processed_at', null)
-          .order('created_at', { ascending: false })
-          .limit(limit);
+        this.log(
+          "info",
+          "No unprocessed analyzed records, checking pending records with predictions",
+          { requestId }
+        );
+
+        const { data: pendingWithPred, error: pendingErr } =
+          await supabaseService.supabase
+            .from("finfluencer_predictions")
+            .select("*")
+            .eq("subject_outcome", "pending")
+            .is("combined_processed_at", null)
+            .order("created_at", { ascending: false })
+            .limit(limit);
 
         if (!pendingErr && pendingWithPred) {
-          finalRecords = pendingWithPred.filter(rec => {
+          finalRecords = pendingWithPred.filter((rec) => {
             try {
-              const arr = Array.isArray(rec.predictions) ? rec.predictions : JSON.parse(rec.predictions || '[]');
+              const arr = Array.isArray(rec.predictions)
+                ? rec.predictions
+                : JSON.parse(rec.predictions || "[]");
               return arr.length > 0;
             } catch {
               return false;
@@ -334,53 +395,76 @@ export class CombinedPredictionsService {
       }
 
       processedRecords = finalRecords?.length || 0;
-      this.log('info', `Processing ${processedRecords} records`, { requestId, recordsFound: processedRecords });
+      this.log("info", `Processing ${processedRecords} records`, {
+        requestId,
+        recordsFound: processedRecords,
+      });
 
       // Process each record
       for (const rec of finalRecords || []) {
         try {
           const videoId = rec.video_id;
-          const predictions = Array.isArray(rec.predictions) ? rec.predictions : JSON.parse(rec.predictions || '[]');
-          const postDateObj = rec.post_date ? new Date(rec.post_date) : new Date();
-          
+          const predictions = Array.isArray(rec.predictions)
+            ? rec.predictions
+            : JSON.parse(rec.predictions || "[]");
+          const postDateObj = rec.post_date
+            ? new Date(rec.post_date)
+            : new Date();
+
           if (!rec.post_date) {
-            this.log('warn', 'Missing post_date for video, defaulting to today', { videoId: rec.video_id });
+            this.log(
+              "warn",
+              "Missing post_date for video, defaulting to today",
+              { videoId: rec.video_id }
+            );
           }
 
           if (!Array.isArray(predictions) || predictions.length === 0) {
-             // Mark as processed if no predictions
-             if (!dryRun) {
-                await supabaseService.supabase.from('finfluencer_predictions').update({ combined_processed_at: new Date().toISOString() }).eq('id', rec.id);
-             }
-             skipped++;
-             continue;
+            // Mark as processed if no predictions
+            if (!dryRun) {
+              await supabaseService.supabase
+                .from("finfluencer_predictions")
+                .update({ combined_processed_at: new Date().toISOString() })
+                .eq("id", rec.id);
+            }
+            skipped++;
+            continue;
           }
 
           // Fetch existing combined predictions to detect duplicates
           let existingRows: any[] = [];
           try {
             const { data } = await supabaseService.supabase
-              .from('combined_predictions')
-              .select('video_id, asset, prediction_text')
-              .eq('video_id', videoId);
+              .from("combined_predictions")
+              .select("video_id, asset, prediction_text")
+              .eq("video_id", videoId);
             existingRows = data || [];
           } catch (e) {
-             // ignore
+            // ignore
           }
 
           // Process each prediction directly
           for (const p of predictions) {
             try {
-              let asset = p.asset || 'UNKNOWN';
+              let asset = p.asset || "UNKNOWN";
               // Normalize asset name immediately
               asset = priceService.normalizeAssetName(asset);
 
-              const predictionText = p.prediction_text || '';
-              const normalizedKey = this.createNormalizedKey(videoId, asset, predictionText);
+              const predictionText = p.prediction_text || "";
+              const normalizedKey = this.createNormalizedKey(
+                videoId,
+                asset,
+                predictionText
+              );
 
               // Check for duplicates
               const isDuplicate = existingRows.some(
-                (ex) => this.createNormalizedKey(ex.video_id, ex.asset, ex.prediction_text) === normalizedKey
+                (ex) =>
+                  this.createNormalizedKey(
+                    ex.video_id,
+                    ex.asset,
+                    ex.prediction_text
+                  ) === normalizedKey
               );
 
               if (isDuplicate) {
@@ -390,7 +474,7 @@ export class CombinedPredictionsService {
 
               // Use raw asset as ticker since we removed AI normalization
               const ticker = asset;
-              
+
               // Infer asset type if missing
               let assetType = p.asset_type;
               if (!assetType) {
@@ -403,13 +487,17 @@ export class CombinedPredictionsService {
               // Fetch historical price if enabled
               let entryPrice = null;
               let formattedEntryPrice = null;
-              
+
               if (!skipPrice && rec.post_date) {
-                const price = await priceService.searchPrice(ticker, postDateObj, assetType);
+                const price = await priceService.searchPrice(
+                  ticker,
+                  postDateObj,
+                  assetType
+                );
                 if (price !== null) {
                   entryPrice = String(price);
                   const symbol = priceService.getCurrencySymbol(currency);
-                  // If symbol is different from ISO code (e.g. $ vs USD), use Prefix ($100). 
+                  // If symbol is different from ISO code (e.g. $ vs USD), use Prefix ($100).
                   // Otherwise use Suffix (100 USD).
                   if (symbol !== currency) {
                     formattedEntryPrice = `${symbol}${Math.round(price)}`;
@@ -421,7 +509,12 @@ export class CombinedPredictionsService {
               }
 
               // Calculate horizon dates
-              const { start: horizonStart, end: horizonEnd } = priceService.calculateHorizonDateRange(postDateObj, p.horizon?.value || '1 month', p.horizon?.type || 'custom');
+              const { start: horizonStart, end: horizonEnd } =
+                priceService.calculateHorizonDateRange(
+                  postDateObj,
+                  p.horizon?.value || "1 month",
+                  p.horizon?.type || "custom"
+                );
 
               // Create combined row
               const combinedRow = {
@@ -434,25 +527,27 @@ export class CombinedPredictionsService {
                 asset_entry_price: entryPrice,
                 formatted_price: formattedEntryPrice,
                 price_currency: currency,
-                horizon_value: p.horizon?.value || '',
-                horizon_type: p.horizon?.type || 'custom', // New field
+                horizon_value: p.horizon?.value || "",
+                horizon_type: p.horizon?.type || "custom", // New field
                 horizon_start_date: horizonStart.toISOString(), // New field
                 horizon_end_date: horizonEnd.toISOString(), // New field
-                sentiment: p.sentiment || 'neutral',
-                confidence: p.confidence || 'medium',
+                sentiment: p.sentiment || "neutral",
+                confidence: p.confidence || "medium",
                 target_price: p.target_price ? String(p.target_price) : null,
                 prediction_text: predictionText,
-                status: 'pending',
-                platform: 'YouTube'
+                status: "pending",
+                platform: "YouTube",
               };
 
               if (!dryRun) {
                 const { error: insertError } = await supabaseService.supabase
-                  .from('combined_predictions')
+                  .from("combined_predictions")
                   .insert(combinedRow);
 
                 if (insertError) {
-                  this.log('error', 'Failed to insert combined prediction', { err: this.safeErrorMessage(insertError) });
+                  this.log("error", "Failed to insert combined prediction", {
+                    err: this.safeErrorMessage(insertError),
+                  });
                   errorsCount++;
                 } else {
                   inserted++;
@@ -460,9 +555,11 @@ export class CombinedPredictionsService {
               } else {
                 inserted++;
               }
-
             } catch (predErr) {
-              this.log('error', 'Error processing single prediction', { err: this.safeErrorMessage(predErr), asset: p.asset });
+              this.log("error", "Error processing single prediction", {
+                err: this.safeErrorMessage(predErr),
+                asset: p.asset,
+              });
               errorsCount++;
             }
           }
@@ -470,44 +567,41 @@ export class CombinedPredictionsService {
           // Mark parent record as processed
           if (!dryRun) {
             await supabaseService.supabase
-              .from('finfluencer_predictions')
+              .from("finfluencer_predictions")
               .update({ combined_processed_at: new Date().toISOString() })
-              .eq('id', rec.id);
+              .eq("id", rec.id);
           }
-
         } catch (err) {
-          this.log('error', 'Error processing record', { err: this.safeErrorMessage(err), videoId: rec.video_id });
+          this.log("error", "Error processing record", {
+            err: this.safeErrorMessage(err),
+            videoId: rec.video_id,
+          });
           errorsCount++;
         }
       }
     } catch (err) {
-      this.log('error', 'Fatal error in executeProcessing', { err: this.safeErrorMessage(err) });
+      this.log("error", "Fatal error in executeProcessing", {
+        err: this.safeErrorMessage(err),
+      });
       errorsCount++;
     }
 
     const runtime = Date.now() - start;
-    this.log('info', 'Combined predictions processing completed', {
+    this.log("info", "Combined predictions processing completed", {
       requestId,
       processed: processedRecords,
       inserted,
       skipped,
       errors: errorsCount,
       pricesFetched,
-      runtimeMs: runtime
+      runtimeMs: runtime,
     });
 
     if (!dryRun) {
-      this.insertTelemetry({
-        function: 'combine_predictions',
-        event: 'completed',
-        request_id: requestId,
-        processed: processedRecords,
-        inserted,
-        skipped,
-        errors: errorsCount,
-        prices_fetched: pricesFetched,
-        runtime_ms: runtime
-      }).catch(() => {});
+      // Report combined predictions metrics
+      reportingService.addCombinedInserted(inserted);
+      reportingService.addCombinedSkipped(skipped);
+      // insertTelemetry removed as function_logs table is being deprecated
     }
 
     return {
@@ -516,7 +610,7 @@ export class CombinedPredictionsService {
       inserted,
       skipped: skipped,
       errors: errorsCount,
-      prices_fetched: pricesFetched
+      prices_fetched: pricesFetched,
     };
   }
 
@@ -525,21 +619,67 @@ export class CombinedPredictionsService {
    */
   private inferAssetType(asset: string): string {
     const upper = asset.toUpperCase().trim();
-    
+
     // Crypto
-    if (['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'DOT', 'AVAX', 'MATIC', 'LINK', 'UNI', 'ATOM', 'LTC', 'BCH'].includes(upper)) return 'crypto';
-    
+    if (
+      [
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "ADA",
+        "DOGE",
+        "DOT",
+        "AVAX",
+        "MATIC",
+        "LINK",
+        "UNI",
+        "ATOM",
+        "LTC",
+        "BCH",
+      ].includes(upper)
+    )
+      return "crypto";
+
     // Commodities
-    if (['GOLD', 'SILVER', 'CRUDE', 'OIL', 'NATURAL GAS', 'BRENT', 'WTI'].includes(upper)) return 'commodity';
-    
+    if (
+      [
+        "GOLD",
+        "SILVER",
+        "CRUDE",
+        "OIL",
+        "NATURAL GAS",
+        "BRENT",
+        "WTI",
+      ].includes(upper)
+    )
+      return "commodity";
+
     // Forex
-    if (['EURUSD', 'USDJPY', 'GBPUSD', 'USDTRY', 'EURTRY', 'XAUUSD'].includes(upper)) return 'fx';
-    
+    if (
+      ["EURUSD", "USDJPY", "GBPUSD", "USDTRY", "EURTRY", "XAUUSD"].includes(
+        upper
+      )
+    )
+      return "fx";
+
     // Indices
-    if (['SP500', 'NASDAQ', 'DOW', 'DAX', 'FTSE', 'NIKKEI', 'BIST100', 'BIST30'].includes(upper)) return 'index';
-    
+    if (
+      [
+        "SP500",
+        "NASDAQ",
+        "DOW",
+        "DAX",
+        "FTSE",
+        "NIKKEI",
+        "BIST100",
+        "BIST30",
+      ].includes(upper)
+    )
+      return "index";
+
     // Default to stock
-    return 'stock';
+    return "stock";
   }
 
   /**
@@ -547,29 +687,38 @@ export class CombinedPredictionsService {
    * @param limit - Maximum number of records to process
    * @param dryRun - If true, will not update the database
    */
-  async retryMissingEntryPrices(limit: number = 50, dryRun: boolean = false): Promise<{ 
-    processed: number, 
-    updated: number, 
-    failed: number 
+  async retryMissingEntryPrices(
+    limit: number = 50,
+    dryRun: boolean = false
+  ): Promise<{
+    processed: number;
+    updated: number;
+    failed: number;
   }> {
     const requestId = Math.random().toString(36).substring(7);
-    this.log('info', 'Starting entry price retry process', { requestId, limit, dryRun });
+    this.log("info", "Starting entry price retry process", {
+      requestId,
+      limit,
+      dryRun,
+    });
 
     try {
       // Fetch predictions with null asset_entry_price
       const { data: rows, error } = await supabaseService.supabase
-        .from('combined_predictions')
-        .select('id, asset, asset_type, post_date')
-        .is('asset_entry_price', null)
+        .from("combined_predictions")
+        .select("id, asset, asset_type, post_date")
+        .is("asset_entry_price", null)
         .limit(limit);
 
       if (error) {
-        this.log('error', 'Error fetching predictions with missing prices', { error });
+        this.log("error", "Error fetching predictions with missing prices", {
+          error,
+        });
         throw error;
       }
 
       if (!rows || rows.length === 0) {
-        this.log('info', 'No predictions found with missing entry prices');
+        this.log("info", "No predictions found with missing entry prices");
         return { processed: 0, updated: 0, failed: 0 };
       }
 
@@ -580,7 +729,7 @@ export class CombinedPredictionsService {
         try {
           const asset = row.asset;
           const postDate = new Date(row.post_date);
-          
+
           // Infer asset type if missing
           let assetType = row.asset_type;
           if (!assetType) {
@@ -588,54 +737,75 @@ export class CombinedPredictionsService {
           }
 
           // Fetch price
-          const price = await priceService.searchPrice(asset, postDate, assetType);
+          const price = await priceService.searchPrice(
+            asset,
+            postDate,
+            assetType
+          );
 
           if (price !== null && !dryRun) {
             // Update the record
             const { error: updateError } = await supabaseService.supabase
-              .from('combined_predictions')
-              .update({ 
+              .from("combined_predictions")
+              .update({
                 asset_entry_price: String(price),
-                asset_type: assetType // Also update asset_type if it was inferred
+                asset_type: assetType, // Also update asset_type if it was inferred
               })
-              .eq('id', row.id);
+              .eq("id", row.id);
 
             if (updateError) {
-              this.log('error', 'Error updating entry price', { id: row.id, error: updateError });
+              this.log("error", "Error updating entry price", {
+                id: row.id,
+                error: updateError,
+              });
               failed++;
             } else {
-              this.log('info', `Updated entry price for ${asset}`, { id: row.id, price });
+              this.log("info", `Updated entry price for ${asset}`, {
+                id: row.id,
+                price,
+              });
               updated++;
             }
           } else if (price === null) {
-            this.log('warn', `Could not fetch price for ${asset} on ${postDate.toISOString()}`, { id: row.id });
+            this.log(
+              "warn",
+              `Could not fetch price for ${asset} on ${postDate.toISOString()}`,
+              { id: row.id }
+            );
             failed++;
           } else {
             // Dry run with price found
-            this.log('info', `[DRY RUN] Would update ${asset} with price ${price}`, { id: row.id });
+            this.log(
+              "info",
+              `[DRY RUN] Would update ${asset} with price ${price}`,
+              { id: row.id }
+            );
             updated++;
           }
 
           // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 500));
-
+          await new Promise((resolve) => setTimeout(resolve, 500));
         } catch (err) {
-          this.log('error', 'Error processing record', { id: row.id, error: this.safeErrorMessage(err) });
+          this.log("error", "Error processing record", {
+            id: row.id,
+            error: this.safeErrorMessage(err),
+          });
           failed++;
         }
       }
 
-      this.log('info', 'Entry price retry process completed', { 
-        requestId, 
-        processed: rows.length, 
-        updated, 
-        failed 
+      this.log("info", "Entry price retry process completed", {
+        requestId,
+        processed: rows.length,
+        updated,
+        failed,
       });
 
       return { processed: rows.length, updated, failed };
-
     } catch (err) {
-      this.log('error', 'Entry price retry process failed', { error: this.safeErrorMessage(err) });
+      this.log("error", "Entry price retry process failed", {
+        error: this.safeErrorMessage(err),
+      });
       throw err;
     }
   }

@@ -21,20 +21,20 @@ export interface FinfluencerPrediction {
   created_at: string;
   updated_at?: string;
   raw_transcript?: string;
-  subject_outcome?: 'pending' | 'out_of_subject' | 'analyzed';
+  subject_outcome?: "pending" | "out_of_subject" | "analyzed";
 }
 
 export interface Prediction {
   asset: string;
-  sentiment: 'bullish' | 'bearish' | 'neutral';
+  sentiment: "bullish" | "bearish" | "neutral";
   prediction_text: string;
   prediction_date: string;
   horizon: {
-    type: 'exact' | 'end_of_year' | 'quarter' | 'month' | 'custom';
+    type: "exact" | "end_of_year" | "quarter" | "month" | "custom";
     value: string;
   };
   target_price: number | null;
-  confidence: 'low' | 'medium' | 'high';
+  confidence: "low" | "medium" | "high";
 }
 
 export interface AIModification {
@@ -67,10 +67,11 @@ export interface AIAnalysisResult {
   predictions: Prediction[];
   ai_modifications: AIModification[];
   raw_transcript?: string;
-  subject_outcome?: 'pending' | 'out_of_subject' | 'analyzed';
+  subject_outcome?: "pending" | "out_of_subject" | "analyzed";
 }
 
 export interface CronJobStats {
+  /** @deprecated Use RunReport instead */
   total_channels: number;
   processed_channels: number;
   total_videos: number;
@@ -81,6 +82,82 @@ export interface CronJobStats {
   errors: number;
   start_time: Date;
   end_time?: Date;
+}
+
+/**
+ * Comprehensive run report for the entire pipeline
+ * Replaces CronJobStats with detailed metrics per stage
+ */
+export interface RunReport {
+  // Metadata
+  run_id: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  status: "running" | "success" | "partial" | "failed";
+  version: string;
+
+  // Stage 1: Channels & Videos
+  channels: {
+    total: number;
+    processed: number;
+    errors: number;
+  };
+  videos: {
+    total: number;
+    processed: number;
+    skipped: number;
+    errors: number;
+  };
+
+  // Stage 2: Transcript Fetching
+  transcripts: {
+    fetched: number;
+    failed: number;
+    source: string; // Last used source: "rapidapi" | "youtube" | "cache"
+    avg_length_chars: number;
+    total_chars: number;
+  };
+
+  // Stage 3: AI Analysis
+  ai_analysis: {
+    processed: number;
+    predictions_extracted: number;
+    out_of_subject: number;
+    errors: number;
+  };
+
+  // Stage 4: Combined Predictions
+  combined_predictions: {
+    processed: number;
+    inserted: number;
+    skipped_duplicates: number;
+    errors: number;
+  };
+
+  // Stage 5: Price Fetching
+  price_fetching: {
+    requests: number;
+    cache_hits: number;
+    api_calls: number;
+    success: number;
+    failed: number;
+    source: string; // Last used source
+  };
+
+  // Stage 6: Verification
+  verification: {
+    processed: number;
+    resolved_correct: number;
+    resolved_wrong: number;
+    still_pending: number;
+  };
+
+  // System Health
+  system: {
+    memory_used_mb: number;
+    errors: string[];
+  };
 }
 
 export interface DatabaseError extends Error {
@@ -99,19 +176,19 @@ export interface OpenRouterError extends Error {
 }
 
 export interface ProcessingLog {
-  level: 'info' | 'warn' | 'error' | 'debug';
+  level: "info" | "warn" | "error" | "debug";
   message: string;
   timestamp: Date;
   context?: any;
 }
 
 export interface TranscriptError extends Error {
-  name: 'TranscriptError';
+  name: "TranscriptError";
 }
 
 export interface RapidAPITranscriptResponse {
   process_id: string;
-  status: 'processing' | 'completed' | 'failed';
+  status: "processing" | "completed" | "failed";
   transcript?: string;
   error?: string;
   // Also handle alternative field names from API
@@ -132,10 +209,10 @@ export interface RapidAPIResult {
   channel_name?: string;
   post_date?: string;
   last_requested?: string;
-  
+
   // Legacy fields for backwards compatibility
   process_id?: string;
-  status?: 'processing' | 'completed' | 'failed';
+  status?: "processing" | "completed" | "failed";
   error?: string;
   created_at?: string;
   completed_at?: string;
