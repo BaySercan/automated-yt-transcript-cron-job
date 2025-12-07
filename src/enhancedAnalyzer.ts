@@ -1,8 +1,13 @@
-import axios from 'axios';
-import { config } from './config';
-import { AIAnalysisResult, Prediction, AIModification } from './types';
-import { OpenRouterError, AnalysisError } from './errors';
-import { logger, retryWithBackoff, detectLanguage, sanitizeText } from './utils';
+import axios from "axios";
+import { config } from "./config";
+import { AIAnalysisResult, Prediction, AIModification } from "./types";
+import { OpenRouterError, AnalysisError } from "./errors";
+import {
+  logger,
+  retryWithBackoff,
+  detectLanguage,
+  sanitizeText,
+} from "./utils";
 
 /**
  * Global Language-Agnostic AI Analyzer
@@ -143,6 +148,7 @@ You MUST return ONLY one JSON object with NO text outside it:
   "predictions": [
     {
       "asset": "<Ticker or asset name from allowed classes>",
+      "asset_type": "<stock | index | commodity | crypto | fx>",
       "sentiment": "<bullish | bearish | neutral>",
       "prediction_text": "<string in detected language>",
       "necessary_conditions_for_prediction": "<string or null>",
@@ -188,42 +194,57 @@ Use this prompt EXACTLY as provided, and follow all instructions to the letter.`
     }
   ): Promise<AIAnalysisResult> {
     if (!transcript || transcript.trim().length === 0) {
-      throw new AnalysisError('Transcript is empty');
+      throw new AnalysisError("Transcript is empty");
     }
 
     // Enhanced validation
     if (transcript.length < 200) {
-      logger.warn(`Transcript too short for analysis: ${transcript.length} characters`);
-      return this.createFallbackResult(videoMetadata, 'unknown', 'Transcript too short for analysis');
+      logger.warn(
+        `Transcript too short for analysis: ${transcript.length} characters`
+      );
+      return this.createFallbackResult(
+        videoMetadata,
+        "unknown",
+        "Transcript too short for analysis"
+      );
     }
 
     try {
       // PRIMARY: Use video's default language from metadata
       const primaryLanguage = this.getPrimaryLanguage(videoMetadata);
-      
+
       // SECONDARY: Content-based detection as fallback
       const detectedLanguage = detectLanguage(transcript);
-      
+
       // Use primary language if available, fallback to detected
       const analysisLanguage = primaryLanguage || detectedLanguage;
-      
+
       logger.info(`Language detection for video ${videoMetadata.videoId}:`, {
         defaultLanguage: videoMetadata.defaultLanguage,
         defaultAudioLanguage: videoMetadata.defaultAudioLanguage,
         detectedLanguage: detectedLanguage,
-        finalLanguage: analysisLanguage
+        finalLanguage: analysisLanguage,
       });
 
       // Check for financial content using universal patterns
-      const hasFinancialContent = this.hasUniversalFinancialContent(transcript, analysisLanguage);
-      
+      const hasFinancialContent = this.hasUniversalFinancialContent(
+        transcript,
+        analysisLanguage
+      );
+
       if (!hasFinancialContent) {
-        logger.info(`No financial content detected for video ${videoMetadata.videoId} (${analysisLanguage}), marking as out of subject`);
+        logger.info(
+          `No financial content detected for video ${videoMetadata.videoId} (${analysisLanguage}), marking as out of subject`
+        );
         return this.createOutOfSubjectResult(videoMetadata, analysisLanguage);
       }
 
       // Enhance prompt based on primary video language
-      const enhancedPrompt = this.enhancePromptForLanguage(this.analysisPrompt, analysisLanguage, !!primaryLanguage);
+      const enhancedPrompt = this.enhancePromptForLanguage(
+        this.analysisPrompt,
+        analysisLanguage,
+        !!primaryLanguage
+      );
       const fullPrompt = `${enhancedPrompt}
 
 --- VIDEO METADATA ---
@@ -231,8 +252,8 @@ Video ID: ${videoMetadata.videoId}
 Title: ${videoMetadata.title}
 Channel: ${videoMetadata.channelName}
 Published: ${videoMetadata.publishedAt}
-Default Language: ${videoMetadata.defaultLanguage || 'unknown'}
-Default Audio Language: ${videoMetadata.defaultAudioLanguage || 'unknown'}
+Default Language: ${videoMetadata.defaultLanguage || "unknown"}
+Default Audio Language: ${videoMetadata.defaultAudioLanguage || "unknown"}
 --- END METADATA ---
 
 --- VIDEO TRANSCRIPT ---
@@ -240,42 +261,67 @@ ${transcript}
 --- END TRANSCRIPT ---`;
 
       // Send to OpenRouter with enhanced error handling
-      const response = await retryWithBackoff(async () => {
-        return this.sendRequest(fullPrompt);
-      }, 3, 2000);
+      const response = await retryWithBackoff(
+        async () => {
+          return this.sendRequest(fullPrompt);
+        },
+        3,
+        2000
+      );
 
       // Enhanced response validation
       const content = this.extractResponseContent(response);
-      
+
       if (!content) {
-        logger.warn('No API response content, creating fallback result');
-        return this.createFallbackResult(videoMetadata, analysisLanguage, 'No API response content');
+        logger.warn("No API response content, creating fallback result");
+        return this.createFallbackResult(
+          videoMetadata,
+          analysisLanguage,
+          "No API response content"
+        );
       }
 
       // Parse and validate response
-      const analysisResult = this.parseAnalysisResponse(content, videoMetadata, analysisLanguage);
-      
-      // Enhanced post-processing
-      const finalResult = this.enhanceAnalysisResult(analysisResult, transcript, analysisLanguage);
+      const analysisResult = this.parseAnalysisResponse(
+        content,
+        videoMetadata,
+        analysisLanguage
+      );
 
-      logger.info(`Successfully analyzed transcript for video ${videoMetadata.videoId}`, {
-        primaryLanguage: primaryLanguage,
-        detectedLanguage: detectedLanguage,
-        finalLanguage: finalResult.language,
-        predictionsFound: finalResult.predictions.length,
-        hasFinancialContent: hasFinancialContent,
-        contentType: hasFinancialContent ? 'financial' : 'non-financial'
-      });
+      // Enhanced post-processing
+      const finalResult = this.enhanceAnalysisResult(
+        analysisResult,
+        transcript,
+        analysisLanguage
+      );
+
+      logger.info(
+        `Successfully analyzed transcript for video ${videoMetadata.videoId}`,
+        {
+          primaryLanguage: primaryLanguage,
+          detectedLanguage: detectedLanguage,
+          finalLanguage: finalResult.language,
+          predictionsFound: finalResult.predictions.length,
+          hasFinancialContent: hasFinancialContent,
+          contentType: hasFinancialContent ? "financial" : "non-financial",
+        }
+      );
 
       return finalResult;
-
     } catch (error) {
-      logger.error(`Error analyzing transcript for video ${videoMetadata.videoId}`, { 
-        error: (error as Error).message,
-        transcriptLength: transcript.length
-      });
-      
-      return this.createFallbackResult(videoMetadata, detectLanguage(transcript), (error as Error).message);
+      logger.error(
+        `Error analyzing transcript for video ${videoMetadata.videoId}`,
+        {
+          error: (error as Error).message,
+          transcriptLength: transcript.length,
+        }
+      );
+
+      return this.createFallbackResult(
+        videoMetadata,
+        detectLanguage(transcript),
+        (error as Error).message
+      );
     }
   }
 
@@ -287,73 +333,143 @@ ${transcript}
     defaultAudioLanguage?: string;
   }): string | null {
     // Priority order: defaultAudioLanguage > defaultLanguage
-    const primary = videoMetadata.defaultAudioLanguage || videoMetadata.defaultLanguage;
-    
+    const primary =
+      videoMetadata.defaultAudioLanguage || videoMetadata.defaultLanguage;
+
     if (primary) {
       // Normalize language codes
-      const normalized = primary.toLowerCase().split('-')[0]; // Remove region code
-      logger.debug(`Using video metadata language: ${primary} -> ${normalized}`);
+      const normalized = primary.toLowerCase().split("-")[0]; // Remove region code
+      logger.debug(
+        `Using video metadata language: ${primary} -> ${normalized}`
+      );
       return normalized;
     }
-    
+
     return null;
   }
 
   /**
    * Universal financial content detection
    */
-  private hasUniversalFinancialContent(transcript: string, language: string): boolean {
+  private hasUniversalFinancialContent(
+    transcript: string,
+    language: string
+  ): boolean {
     const lowerTranscript = transcript.toLowerCase();
-    
+
     // Universal financial patterns (work across languages)
     const universalFinancialPatterns = [
       // Market-related
-      'market', 'stock', 'investment', 'trading', 'price', 'trend', 'analysis',
-      'prediction', 'forecast', 'bullish', 'bearish', 'buy', 'sell', 'hold',
-      'economy', 'economic', 'finance', 'financial', 'currency', 'crypto',
-      'gold', 'silver', 'oil', 'inflation', 'interest', 'rate', 'recession',
-      'growth', 'decline', 'gain', 'loss', 'profit', 'portfolio',
-      
+      "market",
+      "stock",
+      "investment",
+      "trading",
+      "price",
+      "trend",
+      "analysis",
+      "prediction",
+      "forecast",
+      "bullish",
+      "bearish",
+      "buy",
+      "sell",
+      "hold",
+      "economy",
+      "economic",
+      "finance",
+      "financial",
+      "currency",
+      "crypto",
+      "gold",
+      "silver",
+      "oil",
+      "inflation",
+      "interest",
+      "rate",
+      "recession",
+      "growth",
+      "decline",
+      "gain",
+      "loss",
+      "profit",
+      "portfolio",
+
       // Investment terms
-      'asset', 'bond', 'etf', 'fund', 'index', 'derivative', 'hedge',
-      'dividend', 'earnings', 'revenue', 'valuation', 'multiple',
-      
+      "asset",
+      "bond",
+      "etf",
+      "fund",
+      "index",
+      "derivative",
+      "hedge",
+      "dividend",
+      "earnings",
+      "revenue",
+      "valuation",
+      "multiple",
+
       // Financial actions
-      'invest', 'trade', 'speculate', 'hedge', 'diversify', 'allocate',
-      'short', 'long', 'leverage', 'margin', 'derivative'
+      "invest",
+      "trade",
+      "speculate",
+      "hedge",
+      "diversify",
+      "allocate",
+      "short",
+      "long",
+      "leverage",
+      "margin",
+      "derivative",
     ];
 
     // Language-specific financial terms
-    const languageSpecificTerms = this.getLanguageSpecificFinancialTerms(language);
+    const languageSpecificTerms =
+      this.getLanguageSpecificFinancialTerms(language);
 
     // Count financial content
-    const universalCount = universalFinancialPatterns.filter(pattern => 
+    const universalCount = universalFinancialPatterns.filter((pattern) =>
       lowerTranscript.includes(pattern)
     ).length;
 
-    const specificCount = languageSpecificTerms.filter(term => 
+    const specificCount = languageSpecificTerms.filter((term) =>
       lowerTranscript.includes(term)
     ).length;
 
     // Content quality checks
     const isLongEnough = transcript.length >= 200;
     const hasSubstantialContent = transcript.length >= 500;
-    
+
     // Prediction language patterns (universal)
     const predictionPatterns = [
-      'will', 'going to', 'expected', 'projected', 'forecast', 'prediction',
-      'target', 'goal', 'aim', 'estimate', 'anticipate', 'foresee'
+      "will",
+      "going to",
+      "expected",
+      "projected",
+      "forecast",
+      "prediction",
+      "target",
+      "goal",
+      "aim",
+      "estimate",
+      "anticipate",
+      "foresee",
     ];
-    const hasPredictionLanguage = predictionPatterns.some(pattern => 
+    const hasPredictionLanguage = predictionPatterns.some((pattern) =>
       lowerTranscript.includes(pattern)
     );
 
     const totalFinancialTerms = universalCount + specificCount;
     const hasStrongFinancialContent = totalFinancialTerms >= 2;
-    const hasModerateFinancialContent = totalFinancialTerms >= 1 && hasSubstantialContent;
-    const hasPredictionBasedContent = hasPredictionLanguage && (totalFinancialTerms >= 1 || hasSubstantialContent);
-    
-    const hasFinancialContent = hasStrongFinancialContent || hasModerateFinancialContent || hasPredictionBasedContent;
+    const hasModerateFinancialContent =
+      totalFinancialTerms >= 1 && hasSubstantialContent;
+    const hasPredictionBasedContent =
+      hasPredictionLanguage &&
+      (totalFinancialTerms >= 1 || hasSubstantialContent);
+
+    const hasFinancialContent =
+      hasStrongFinancialContent ||
+      hasModerateFinancialContent ||
+      hasPredictionBasedContent;
 
     logger.debug(`Universal financial content check:`, {
       language,
@@ -366,7 +482,7 @@ ${transcript}
       hasStrongFinancialContent,
       hasModerateFinancialContent,
       hasPredictionBasedContent,
-      hasFinancialContent
+      hasFinancialContent,
     });
 
     return isLongEnough && hasFinancialContent;
@@ -377,36 +493,145 @@ ${transcript}
    */
   private getLanguageSpecificFinancialTerms(language: string): string[] {
     const terms: { [key: string]: string[] } = {
-      'tr': [
-        'borsa', 'yatırım', 'hisse', 'endeks', 'dolar', 'euro', 'avro', 'altın',
-        'gümüş', 'petrol', 'enflasyon', 'faiz', 'yükseliş', 'düşüş', 'piyasa',
-        'tahmin', 'analiz', 'strateji', 'portföy', 'gelir', 'kar', 'zarar'
+      tr: [
+        "borsa",
+        "yatırım",
+        "hisse",
+        "endeks",
+        "dolar",
+        "euro",
+        "avro",
+        "altın",
+        "gümüş",
+        "petrol",
+        "enflasyon",
+        "faiz",
+        "yükseliş",
+        "düşüş",
+        "piyasa",
+        "tahmin",
+        "analiz",
+        "strateji",
+        "portföy",
+        "gelir",
+        "kar",
+        "zarar",
       ],
-      'es': [
-        'bolsa', 'inversión', 'acciones', 'índice', 'dólar', 'euro', 'oro',
-        'plata', 'petróleo', 'inflación', 'interés', 'alza', 'bajada', 'mercado',
-        'predicción', 'análisis', 'estrategia', 'cartera', 'ingreso', 'ganancia', 'pérdida'
+      es: [
+        "bolsa",
+        "inversión",
+        "acciones",
+        "índice",
+        "dólar",
+        "euro",
+        "oro",
+        "plata",
+        "petróleo",
+        "inflación",
+        "interés",
+        "alza",
+        "bajada",
+        "mercado",
+        "predicción",
+        "análisis",
+        "estrategia",
+        "cartera",
+        "ingreso",
+        "ganancia",
+        "pérdida",
       ],
-      'de': [
-        'börse', 'investition', 'aktien', 'index', 'dollar', 'euro', 'gold',
-        'silber', 'öl', 'inflation', 'zins', 'steigen', 'fallen', 'markt',
-        'vorhersage', 'analyse', 'strategie', 'portfolio', 'einkommen', 'gewinn', 'verlust'
+      de: [
+        "börse",
+        "investition",
+        "aktien",
+        "index",
+        "dollar",
+        "euro",
+        "gold",
+        "silber",
+        "öl",
+        "inflation",
+        "zins",
+        "steigen",
+        "fallen",
+        "markt",
+        "vorhersage",
+        "analyse",
+        "strategie",
+        "portfolio",
+        "einkommen",
+        "gewinn",
+        "verlust",
       ],
-      'zh': [
-        '股市', '投资', '股票', '指数', '美元', '欧元', '黄金',
-        '白银', '石油', '通胀', '利率', '上涨', '下跌', '市场',
-        '预测', '分析', '策略', '投资组合', '收入', '利润', '损失'
+      zh: [
+        "股市",
+        "投资",
+        "股票",
+        "指数",
+        "美元",
+        "欧元",
+        "黄金",
+        "白银",
+        "石油",
+        "通胀",
+        "利率",
+        "上涨",
+        "下跌",
+        "市场",
+        "预测",
+        "分析",
+        "策略",
+        "投资组合",
+        "收入",
+        "利润",
+        "损失",
       ],
-      'ja': [
-        '株式', '投資', '株価', '指数', 'ドル', 'ユーロ', '金',
-        '銀', '石油', 'インフレ', '金利', '上昇', '下落', '市場',
-        '予測', '分析', '戦略', 'ポートフォリオ', '収入', '利益', '損失'
+      ja: [
+        "株式",
+        "投資",
+        "株価",
+        "指数",
+        "ドル",
+        "ユーロ",
+        "金",
+        "銀",
+        "石油",
+        "インフレ",
+        "金利",
+        "上昇",
+        "下落",
+        "市場",
+        "予測",
+        "分析",
+        "戦略",
+        "ポートフォリオ",
+        "収入",
+        "利益",
+        "損失",
       ],
-      'ar': [
-        'البورصة', 'الاستثمار', 'الأسهم', 'المؤشر', 'الدولار', 'اليورو', 'الذهب',
-        'الفضة', 'النفط', 'التضخم', 'سعر الفائدة', 'ارتفاع', 'انخفاض', 'السوق',
-        'التنبؤ', 'التحليل', 'الاستراتيجية', 'المحفظة', 'الدخل', 'الربح', 'الخسارة'
-      ]
+      ar: [
+        "البورصة",
+        "الاستثمار",
+        "الأسهم",
+        "المؤشر",
+        "الدولار",
+        "اليورو",
+        "الذهب",
+        "الفضة",
+        "النفط",
+        "التضخم",
+        "سعر الفائدة",
+        "ارتفاع",
+        "انخفاض",
+        "السوق",
+        "التنبؤ",
+        "التحليل",
+        "الاستراتيجية",
+        "المحفظة",
+        "الدخل",
+        "الربح",
+        "الخسارة",
+      ],
     };
 
     return terms[language] || [];
@@ -415,34 +640,42 @@ ${transcript}
   /**
    * Enhance prompt based on detected video language
    */
-  private enhancePromptForLanguage(basePrompt: string, analysisLanguage: string, isVideoDefault?: boolean): string {
+  private enhancePromptForLanguage(
+    basePrompt: string,
+    analysisLanguage: string,
+    isVideoDefault?: boolean
+  ): string {
     const languageNames: { [key: string]: string } = {
-      'en': 'English',
-      'es': 'Spanish', 
-      'de': 'German',
-      'fr': 'French',
-      'it': 'Italian',
-      'pt': 'Portuguese',
-      'zh': 'Chinese',
-      'ja': 'Japanese',
-      'ko': 'Korean',
-      'ar': 'Arabic',
-      'tr': 'Turkish',
-      'ru': 'Russian',
-      'hi': 'Hindi'
+      en: "English",
+      es: "Spanish",
+      de: "German",
+      fr: "French",
+      it: "Italian",
+      pt: "Portuguese",
+      zh: "Chinese",
+      ja: "Japanese",
+      ko: "Korean",
+      ar: "Arabic",
+      tr: "Turkish",
+      ru: "Russian",
+      hi: "Hindi",
     };
 
-    const languageName = languageNames[analysisLanguage] || analysisLanguage.toUpperCase();
-    
-    return basePrompt + `
+    const languageName =
+      languageNames[analysisLanguage] || analysisLanguage.toUpperCase();
+
+    return (
+      basePrompt +
+      `
 
 **MULTILINGUAL ANALYSIS ENHANCEMENT:**
 - PRIMARY LANGUAGE: ${analysisLanguage} (${languageName})
-- SOURCE: Video metadata language is ${isVideoDefault ? 'PRIMARY' : 'FALLBACK'}
+- SOURCE: Video metadata language is ${isVideoDefault ? "PRIMARY" : "FALLBACK"}
 - Focus on ${languageName} financial terminology and expressions
 - Extract predictions using ${languageName} financial language patterns
 - Ensure transcript summary is in ${languageName}
-- Adapt analysis approach to ${languageName} linguistic patterns`;
+- Adapt analysis approach to ${languageName} linguistic patterns`
+    );
   }
 
   /**
@@ -454,13 +687,17 @@ ${transcript}
       () => response?.choices?.[0]?.message?.content,
       () => response?.data?.choices?.[0]?.message?.content,
       () => response?.output?.choices?.[0]?.message?.content,
-      () => typeof response === 'string' ? response : null
+      () => (typeof response === "string" ? response : null),
     ];
 
     for (const fallback of fallbacks) {
       try {
         const content = fallback();
-        if (content && typeof content === 'string' && content.trim().length > 0) {
+        if (
+          content &&
+          typeof content === "string" &&
+          content.trim().length > 0
+        ) {
           return content;
         }
       } catch (error) {
@@ -475,17 +712,21 @@ ${transcript}
    * Enhanced analysis result processing
    */
   private enhanceAnalysisResult(
-    result: AIAnalysisResult, 
-    transcript: string, 
+    result: AIAnalysisResult,
+    transcript: string,
     language: string
   ): AIAnalysisResult {
     // If no predictions but has financial content, create a more descriptive result
-    if (result.predictions.length === 0 && this.hasUniversalFinancialContent(transcript, language)) {
+    if (
+      result.predictions.length === 0 &&
+      this.hasUniversalFinancialContent(transcript, language)
+    ) {
       return {
         ...result,
-        transcript_summary: result.transcript_summary || 
+        transcript_summary:
+          result.transcript_summary ||
           `Financial analysis content detected in ${language}. Content discusses market trends, investments, or economic developments but no specific predictions were extracted.`,
-        language: language
+        language: language,
       };
     }
 
@@ -510,31 +751,33 @@ ${transcript}
       channel_name: sanitizeText(videoMetadata.channelName),
       video_id: videoMetadata.videoId,
       video_title: sanitizeText(videoMetadata.title),
-      post_date: videoMetadata.publishedAt.split('T')[0]!,
+      post_date: videoMetadata.publishedAt.split("T")[0]!,
       language: language,
-      transcript_summary: 'Content does not appear to be financial or economic in nature',
+      transcript_summary:
+        "Content does not appear to be financial or economic in nature",
       predictions: [],
-      ai_modifications: []
+      ai_modifications: [],
     };
   }
 
   // Reuse existing utility methods...
   private async sendRequest(prompt: string): Promise<any> {
     const requestBody = {
-      model: config.openrouterModel,
+      model: [config.openrouterModel, config.openrouterModel2],
       messages: [
         {
-          role: 'system',
-          content: 'You are a multilingual financial analyst AI. Respond with ONLY valid JSON. No markdown, no explanations.'
+          role: "system",
+          content:
+            "You are a multilingual financial analyst AI. Respond with ONLY valid JSON. No markdown, no explanations.",
         },
         {
-          role: 'user',
-          content: prompt
-        }
+          role: "user",
+          content: prompt,
+        },
       ],
       temperature: config.openrouterTemperature,
       max_tokens: config.openrouterMaxTokens,
-      response_format: { type: 'json_object' }
+      response_format: { type: "json_object" },
     };
 
     const response = await axios.post(
@@ -542,17 +785,19 @@ ${transcript}
       requestBody,
       {
         headers: {
-          'Authorization': `Bearer ${config.openrouterApiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://finfluencer-tracker.com',
-          'X-Title': 'Finfluencer Tracker'
+          Authorization: `Bearer ${config.openrouterApiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://finfluencer-tracker.com",
+          "X-Title": "Finfluencer Tracker",
         },
-        timeout: config.requestTimeout
+        timeout: config.requestTimeout,
       }
     );
 
     if (response.status !== 200) {
-      throw new OpenRouterError(`OpenRouter API returned status ${response.status}`);
+      throw new OpenRouterError(
+        `OpenRouter API returned status ${response.status}`
+      );
     }
 
     return response.data;
@@ -568,23 +813,30 @@ ${transcript}
 
     return {
       channel_id: parsed.channel_id || videoMetadata.channelId,
-      channel_name: sanitizeText(parsed.channel_name || videoMetadata.channelName),
+      channel_name: sanitizeText(
+        parsed.channel_name || videoMetadata.channelName
+      ),
       video_id: parsed.video_id || videoMetadata.videoId,
       video_title: sanitizeText(parsed.video_title || videoMetadata.title),
-      post_date: parsed.post_date || videoMetadata.publishedAt.split('T')[0],
+      post_date: parsed.post_date || videoMetadata.publishedAt.split("T")[0],
       language: parsed.language || detectedLanguage,
-      transcript_summary: sanitizeText(parsed.transcript_summary || ''),
+      transcript_summary: sanitizeText(parsed.transcript_summary || ""),
       predictions: this.validatePredictions(parsed.predictions || []),
-      ai_modifications: this.validateModifications(parsed.ai_modifications || [])
+      ai_modifications: this.validateModifications(
+        parsed.ai_modifications || []
+      ),
     };
   }
 
   private cleanJsonResponse(content: string): string {
     let cleaned = content.trim();
-    cleaned = cleaned.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
-    cleaned = cleaned.replace(/```\s*/g, '').replace(/```\s*$/g, '');
-    cleaned = cleaned.replace(/^(Here is|Here's|The result is|Result:|Output:)\s*/i, '');
-    cleaned = cleaned.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
+    cleaned = cleaned.replace(/```json\s*/g, "").replace(/```\s*$/g, "");
+    cleaned = cleaned.replace(/```\s*/g, "").replace(/```\s*$/g, "");
+    cleaned = cleaned.replace(
+      /^(Here is|Here's|The result is|Result:|Output:)\s*/i,
+      ""
+    );
+    cleaned = cleaned.replace(/,\s*}/g, "}").replace(/,\s*]/g, "]");
     cleaned = cleaned.replace(/\\"/g, '"');
     return cleaned.trim();
   }
@@ -592,54 +844,65 @@ ${transcript}
   private validatePredictions(predictions: any[]): Prediction[] {
     if (!Array.isArray(predictions)) return [];
     return predictions
-      .filter(pred => pred && typeof pred === 'object')
-      .map(pred => ({
-        asset: sanitizeText(String(pred.asset || '')).toUpperCase(),
+      .filter((pred) => pred && typeof pred === "object")
+      .map((pred) => ({
+        asset: sanitizeText(String(pred.asset || "")).toUpperCase(),
         sentiment: this.validateSentiment(pred.sentiment),
-        prediction_text: sanitizeText(String(pred.prediction_text || '')),
+        prediction_text: sanitizeText(String(pred.prediction_text || "")),
         prediction_date: this.validateDate(pred.prediction_date),
         horizon: this.validateHorizon(pred.horizon),
         target_price: this.validateTargetPrice(pred.target_price),
-        confidence: this.validateConfidence(pred.confidence)
+        confidence: this.validateConfidence(pred.confidence),
       }))
-      .filter(pred => pred.asset && pred.prediction_text);
+      .filter((pred) => pred.asset && pred.prediction_text);
   }
 
   private validateModifications(modifications: any[]): AIModification[] {
     if (!Array.isArray(modifications)) return [];
     return modifications
-      .filter(mod => mod && typeof mod === 'object')
-      .map(mod => ({
-        field: sanitizeText(String(mod.field || '')),
+      .filter((mod) => mod && typeof mod === "object")
+      .map((mod) => ({
+        field: sanitizeText(String(mod.field || "")),
         original_value: mod.original_value,
         corrected_value: mod.corrected_value,
-        reason: sanitizeText(String(mod.reason || ''))
+        reason: sanitizeText(String(mod.reason || "")),
       }))
-      .filter(mod => mod.field && mod.reason);
+      .filter((mod) => mod.field && mod.reason);
   }
 
-  private validateSentiment(sentiment: any): 'bullish' | 'bearish' | 'neutral' {
-    const valid = ['bullish', 'bearish', 'neutral'];
-    const normalized = String(sentiment || '').toLowerCase();
-    return valid.includes(normalized) ? normalized as any : 'neutral';
+  private validateSentiment(sentiment: any): "bullish" | "bearish" | "neutral" {
+    const valid = ["bullish", "bearish", "neutral"];
+    const normalized = String(sentiment || "").toLowerCase();
+    return valid.includes(normalized) ? (normalized as any) : "neutral";
   }
 
   private validateDate(date: any): string {
-    if (!date) return new Date().toISOString().split('T')[0]!;
+    if (!date) return new Date().toISOString().split("T")[0]!;
     const dateStr = String(date);
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    return dateRegex.test(dateStr) ? dateStr : new Date().toISOString().split('T')[0]!;
+    return dateRegex.test(dateStr)
+      ? dateStr
+      : new Date().toISOString().split("T")[0]!;
   }
 
-  private validateHorizon(horizon: any): { type: 'exact' | 'end_of_year' | 'quarter' | 'month' | 'custom'; value: string } {
-    if (!horizon || typeof horizon !== 'object') {
-      return { type: 'custom', value: 'unknown' };
+  private validateHorizon(horizon: any): {
+    type: "exact" | "end_of_year" | "quarter" | "month" | "custom";
+    value: string;
+  } {
+    if (!horizon || typeof horizon !== "object") {
+      return { type: "custom", value: "unknown" };
     }
-    const validTypes: ('exact' | 'end_of_year' | 'quarter' | 'month' | 'custom')[] = ['exact', 'end_of_year', 'quarter', 'month', 'custom'];
-    const type = validTypes.includes(String(horizon.type || '') as any) 
-      ? (String(horizon.type || '') as any) 
-      : 'custom';
-    return { type, value: sanitizeText(String(horizon.value || 'unknown')) };
+    const validTypes: (
+      | "exact"
+      | "end_of_year"
+      | "quarter"
+      | "month"
+      | "custom"
+    )[] = ["exact", "end_of_year", "quarter", "month", "custom"];
+    const type = validTypes.includes(String(horizon.type || "") as any)
+      ? (String(horizon.type || "") as any)
+      : "custom";
+    return { type, value: sanitizeText(String(horizon.value || "unknown")) };
   }
 
   private validateTargetPrice(price: any): number | null {
@@ -648,10 +911,10 @@ ${transcript}
     return !isNaN(num) && num > 0 ? num : null;
   }
 
-  private validateConfidence(confidence: any): 'low' | 'medium' | 'high' {
-    const valid = ['low', 'medium', 'high'];
-    const normalized = String(confidence || '').toLowerCase();
-    return valid.includes(normalized) ? normalized as any : 'medium';
+  private validateConfidence(confidence: any): "low" | "medium" | "high" {
+    const valid = ["low", "medium", "high"];
+    const normalized = String(confidence || "").toLowerCase();
+    return valid.includes(normalized) ? (normalized as any) : "medium";
   }
 
   private createFallbackResult(
@@ -664,11 +927,13 @@ ${transcript}
       channel_name: sanitizeText(videoMetadata.channelName),
       video_id: videoMetadata.videoId,
       video_title: sanitizeText(videoMetadata.title),
-      post_date: videoMetadata.publishedAt.split('T')[0]!,
+      post_date: videoMetadata.publishedAt.split("T")[0]!,
       language: detectedLanguage,
-      transcript_summary: errorMessage ? `Analysis failed: ${errorMessage}` : 'Analysis completed - no structured data extracted',
+      transcript_summary: errorMessage
+        ? `Analysis failed: ${errorMessage}`
+        : "Analysis completed - no structured data extracted",
       predictions: [],
-      ai_modifications: []
+      ai_modifications: [],
     };
   }
 }

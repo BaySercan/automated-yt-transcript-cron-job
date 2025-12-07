@@ -2,25 +2,15 @@ import axios from 'axios';
 import { config } from './config';
 import { logger } from './utils';
 import { supabaseService } from './supabase';
-import { tickerNormalizationService } from './tickerNormalizationService';
-
-// Lazy load yahooFinance as ESM module
-let yahooFinance: any = null;
+import { priceService } from './services/priceService';
 
 /**
  * Combined Predictions Service
- * Processes analyzed predictions, fetches historical prices, and stores combined predictions
- * Integrates AI analysis for price predictions and sentiment validation
+ * Processes analyzed predictions, fetches historical prices via Google Search, and stores combined predictions
  */
 export class CombinedPredictionsService {
   private readonly DEFAULT_CONCURRENCY = 3;
   private readonly DEFAULT_RETRY_COUNT = 3;
-  private readonly INITIAL_BACKOFF_MS = 500;
-  private readonly ALPHA_VANTAGE_API_KEY = process.env.ALPHA_VANTAGE_API_KEY || '';
-  private readonly FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || '';
-  private readonly TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY || '';
-  private readonly STOP_ON_RATE_LIMIT = (process.env.STOP_ON_RATE_LIMIT || 'false').toLowerCase() === 'true';
-  private disabledProviders: Set<string> = new Set();
 
   /**
    * Log structured logs similar to edge function
@@ -37,327 +27,6 @@ export class CombinedPredictionsService {
     if (typeof err === 'string') return err;
     if (typeof err === 'object') return err.message ?? JSON.stringify(err);
     return String(err);
-  }
-
-  /**
-   * Sleep utility for backoff
-   */
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Fetch from AlphaVantage with retries
-   */
-  private async fetchAlphaVantageWithRetries(
-    url: string,
-    retryCount: number = this.DEFAULT_RETRY_COUNT,
-    requestId: string = ''
-  ): Promise<{ ok: boolean; data?: any; error?: string; rateLimited?: boolean }> {
-    let attempt = 0;
-    let backoff = this.INITIAL_BACKOFF_MS;
-
-    while (attempt <= retryCount) {
-      attempt++;
-      try {
-        const resp = await axios.get(url, { timeout: 10000 });
-        const data = resp.data;
-
-        // Check for rate limit indicators
-        if (data?.Note || data?.Information || resp.status === 429) {
-          this.log('warn', 'AlphaVantage rate limit/info', {
-            requestId,
-            attempt,
-            message: data?.Note ?? data?.Information ?? `HTTP ${resp.status}`
-          });
-          return { ok: false, error: data?.Note ?? data?.Information ?? `HTTP ${resp.status}`, rateLimited: true };
-        }
-
-        return { ok: true, data };
-      } catch (err: any) {
-        if (err?.isRateLimit) await this.sleep(backoff * 4);
-        else await this.sleep(backoff);
-
-        backoff *= 2;
-
-        if (attempt > retryCount) {
-          return {
-            ok: false,
-            error: this.safeErrorMessage(err)
-          };
-        }
-      }
-    }
-
-    return {
-      ok: false,
-      error: 'exhausted retries'
-    };
-  }
-
-  /**
-   * Get historical price for a given date with smart provider fallback
-   */
-  private async getPriceForDate(
-    assetName: string,
-    dateStr: string,
-    retryCount: number,
-    requestId: string
-  ): Promise<{ price: number | null; note: string | null; ticker?: string }> {
-    try {
-      // Normalize asset name to ticker using curated mapping
-      const normalized = await tickerNormalizationService.normalizeTicker(assetName, { useAI: false });
-      const symbol = normalized.ticker;
-
-      // Primary source: yahoo-finance2 (single, reliable client)
-      try {
-        if (!this.disabledProviders.has('yahoo2')) {
-          const yfRes = await this.getPriceFromYahooFinance(symbol, dateStr);
-          if (yfRes.ok) return { price: yfRes.price ?? null, note: null, ticker: symbol };
-          if (yfRes.rateLimited) {
-            this.log('warn', 'yahoo-finance2 rate limit, disabling provider', { requestId });
-            this.disabledProviders.add('yahoo2');
-            if (this.STOP_ON_RATE_LIMIT) throw new Error('RateLimitReached');
-          }
-        }
-      } catch (e) {
-        this.log('warn', 'yahoo-finance2 fetch failed', { err: this.safeErrorMessage(e), symbol });
-      }
-
-      // Try AlphaVantage first
-      if (this.ALPHA_VANTAGE_API_KEY && !this.disabledProviders.has('alphavantage')) {
-        const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(symbol)}&apikey=${this.ALPHA_VANTAGE_API_KEY}&outputsize=full`;
-        const fetchRes = await this.fetchWithFallback('alphavantage', url, 'av', retryCount, requestId);
-
-        if (!fetchRes.ok) {
-          if (fetchRes.rateLimited) {
-            this.log('warn', 'AlphaVantage rate limit, disabling provider', { requestId });
-            this.disabledProviders.add('alphavantage');
-            if (this.STOP_ON_RATE_LIMIT) throw new Error('RateLimitReached');
-            // otherwise fallthrough to try fallbacks
-          } else {
-            this.log('warn', 'AlphaVantage fetch failed, trying fallback', { error: fetchRes.error, symbol });
-          }
-        } else {
-          const series = fetchRes.data?.['Time Series (Daily)'];
-          if (series && series[dateStr]) {
-            const p = parseFloat(series[dateStr]['4. close']);
-            if (!isNaN(p)) return { price: p, note: null, ticker: symbol };
-          }
-        }
-      }
-
-      // Fallback 1: Finnhub
-      if (this.FINNHUB_API_KEY && !this.disabledProviders.has('finnhub')) {
-        try {
-          const res = await this.getPriceFromFinnhub(symbol, dateStr);
-          if (res.ok) return { price: res.price, note: null, ticker: symbol };
-          if (res.rateLimited) {
-            this.log('warn', 'Finnhub rate limit, disabling provider', { requestId });
-            this.disabledProviders.add('finnhub');
-            if (this.STOP_ON_RATE_LIMIT) throw new Error('RateLimitReached');
-          }
-        } catch (e) {
-          this.log('warn', 'Finnhub price fetch failed', { err: this.safeErrorMessage(e), symbol });
-        }
-      }
-
-      // Fallback 2: TwelveData
-      if (this.TWELVE_DATA_API_KEY && !this.disabledProviders.has('twelvedata')) {
-        try {
-          const res = await this.getPriceFromTwelveData(symbol, dateStr);
-          if (res.ok) return { price: res.price, note: null, ticker: symbol };
-          if (res.rateLimited) {
-            this.log('warn', 'TwelveData rate limit, disabling provider', { requestId });
-            this.disabledProviders.add('twelvedata');
-            if (this.STOP_ON_RATE_LIMIT) throw new Error('RateLimitReached');
-          }
-        } catch (e) {
-          this.log('warn', 'TwelveData price fetch failed', { err: this.safeErrorMessage(e), symbol });
-        }
-      }
-
-      // Fallback 3: Yahoo Chart (no API key required)
-      if (!this.disabledProviders.has('yahoo')) {
-        try {
-          const res = await this.getPriceFromYahoo(symbol, dateStr);
-          if (res.ok) return { price: res.price, note: null, ticker: symbol };
-          if (res.rateLimited) {
-            this.log('warn', 'Yahoo rate limit, disabling provider', { requestId });
-            this.disabledProviders.add('yahoo');
-            if (this.STOP_ON_RATE_LIMIT) throw new Error('RateLimitReached');
-          }
-        } catch (e) {
-          this.log('warn', 'Yahoo price fetch failed', { err: this.safeErrorMessage(e), symbol });
-        }
-      }
-
-      return { price: null, note: 'no-data-for-date' };
-    } catch (err) {
-      return {
-        price: null,
-        note: this.safeErrorMessage(err)
-      };
-    }
-  }
-
-  /**
-   * Smart API fallback wrapper with limit detection
-   */
-  private async fetchWithFallback(provider: string, url: string, shortName: string, retryCount: number, requestId: string): Promise<{ ok: boolean; data?: any; error?: string; rateLimited?: boolean }> {
-    try {
-      const resp = await axios.get(url, { timeout: 10000 });
-      const data = resp.data;
-
-      // Detect rate limit signals
-      if (data?.Note || data?.Information || resp.status === 429) {
-        const msg = data?.Note ?? data?.Information ?? `HTTP ${resp.status}`;
-        this.log('warn', `${shortName} rate limit/info`, { provider, message: msg, requestId });
-        return { ok: false, error: msg, rateLimited: true };
-      }
-
-      return { ok: true, data };
-    } catch (err: any) {
-      const msg = this.safeErrorMessage(err);
-      // Check if error response indicates rate limiting
-      if (err?.response?.status === 429 || msg.toLowerCase().includes('rate') || msg.toLowerCase().includes('limit')) {
-        return { ok: false, error: msg, rateLimited: true };
-      }
-      return { ok: false, error: msg };
-    }
-  }
-
-  // Minimal Finnhub implementation (requires FINNHUB_API_KEY)
-  private async getPriceFromFinnhub(symbol: string, dateStr: string): Promise<{ ok: boolean; price?: number; rateLimited?: boolean }> {
-    try {
-      const from = Math.floor(new Date(dateStr).getTime() / 1000);
-      const to = from + 24 * 60 * 60;
-      const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}&resolution=D&from=${from}&to=${to}&token=${this.FINNHUB_API_KEY}`;
-      const resp = await axios.get(url, { timeout: 10000 });
-      const d = resp.data;
-
-      // Check for Finnhub rate limit or errors
-      if (d?.error || resp.status === 429) {
-        return { ok: false, rateLimited: true };
-      }
-      if (d && Array.isArray(d.c) && d.c.length > 0) {
-        return { ok: true, price: d.c[d.c.length - 1] };
-      }
-      return { ok: false };
-    } catch (err: any) {
-      if (err?.response?.status === 429) return { ok: false, rateLimited: true };
-      throw err;
-    }
-  }
-
-  // Minimal TwelveData implementation (requires TWELVE_DATA_API_KEY)
-  private async getPriceFromTwelveData(symbol: string, dateStr: string): Promise<{ ok: boolean; price?: number; rateLimited?: boolean }> {
-    try {
-      const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&start_date=${dateStr}&end_date=${dateStr}&apikey=${this.TWELVE_DATA_API_KEY}`;
-      const resp = await axios.get(url, { timeout: 10000 });
-      const d = resp.data;
-
-      // Check for TwelveData rate limit or errors
-      if (d?.status === 'error' || resp.status === 429 || d?.message?.toLowerCase().includes('rate')) {
-        return { ok: false, rateLimited: true };
-      }
-      if (d && d.values && d.values.length > 0) {
-        const v = d.values[0];
-        const p = parseFloat(v.close);
-        if (!isNaN(p)) return { ok: true, price: p };
-      }
-      return { ok: false };
-    } catch (err: any) {
-      if (err?.response?.status === 429) return { ok: false, rateLimited: true };
-      throw err;
-    }
-  }
-
-  // Yahoo Finance chart endpoint (no API key, best-effort)
-  private async getPriceFromYahoo(symbol: string, dateStr: string): Promise<{ ok: boolean; price?: number; rateLimited?: boolean }> {
-    try {
-      const range = '1d';
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=1d`;
-      const resp = await axios.get(url, { timeout: 10000 });
-      const d = resp.data;
-
-      // Check for rate limit
-      if (resp.status === 429) return { ok: false, rateLimited: true };
-
-      const close = d?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.[0];
-      if (close || close === 0) return { ok: true, price: close };
-      return { ok: false };
-    } catch (err: any) {
-      if (err?.response?.status === 429) return { ok: false, rateLimited: true };
-      throw err;
-    }
-  }
-
-  // Yahoo Finance via yahoo-finance2 (preferred primary client)
-  private async getPriceFromYahooFinance(symbol: string, dateStr: string): Promise<{ ok: boolean; price?: number; rateLimited?: boolean }> {
-    try {
-      // Lazy load ESM module on first call
-      // Lazy load ESM module on first call
-      if (!yahooFinance) {
-        // Mock Deno to prevent ReferenceError in the package
-        if (typeof (global as any).Deno === 'undefined') {
-          (global as any).Deno = {
-            stdout: {
-              write: (data: any) => Promise.resolve(data.length),
-              isTerminal: () => false
-            },
-            stderr: {
-              write: (data: any) => Promise.resolve(data.length),
-              isTerminal: () => false
-            },
-            version: { deno: '1.0.0' }
-          };
-        }
-
-        // Use @gadicc package (v3 JSR) which is modular
-        // @ts-ignore: TS2307
-        const mod: any = await import('@gadicc/yahoo-finance2');
-        // @ts-ignore: TS2307
-        const historicalMod: any = await import('@gadicc/yahoo-finance2/modules/historical');
-        
-        const YahooFinanceClass = mod.default || mod;
-        yahooFinance = new YahooFinanceClass({
-          modules: { 
-            historical: historicalMod.default || historicalMod 
-          }
-        });
-      }
-
-      // Parse target date
-      const targetDate = new Date(dateStr);
-      if (isNaN(targetDate.getTime())) return { ok: false };
-
-      // Set period2 to the next day to ensure a valid range
-      const nextDay = new Date(targetDate);
-      nextDay.setDate(nextDay.getDate() + 1);
-
-      // Call historical with date range
-      const res: any = await yahooFinance.historical(symbol, {
-        period1: targetDate,
-        period2: nextDay
-      });
-
-      // res is typically an array of { date, open, high, low, close, adjClose, volume }
-      if (Array.isArray(res) && res.length > 0) {
-        const item = res[0];
-        const close = item?.close ?? item?.adjClose ?? item?.adj_close;
-        if (typeof close === 'number' && close > 0) {
-          return { ok: true, price: close };
-        }
-      }
-
-      return { ok: false };
-    } catch (err: any) {
-      const msg = this.safeErrorMessage(err);
-      if (err?.status === 429 || msg.toLowerCase().includes('rate')) return { ok: false, rateLimited: true };
-      this.log('warn', 'yahoo-finance2 fetch error', { err: msg, symbol, dateStr });
-      return { ok: false };
-    }
   }
 
   /**
@@ -386,12 +55,6 @@ export class CombinedPredictionsService {
   private createNormalizedKey(videoId: string, asset: string, text: string): string {
     return `${videoId}::${(asset || '').toUpperCase().trim()}::${this.normalizePredictionText(text)}`;
   }
-
-  /**
-   * Analyze combined prediction using OpenRouter AI
-   * Enriches prediction with AI-generated insights
-   */
-
 
   /**
    * Insert telemetry record for tracking
@@ -436,11 +99,6 @@ export class CombinedPredictionsService {
   }
 
   /**
-   * Enrich a batch of predictions using AI to normalize tickers, types, and dates
-   */
-
-
-  /**
    * Main processing function
    * Combines analyzed predictions, fetches prices, and stores in combined_predictions table
    */
@@ -450,7 +108,6 @@ export class CombinedPredictionsService {
     dryRun?: boolean;
     concurrency?: number;
     retryCount?: number;
-    enableAIAnalysis?: boolean;
     requestId?: string;
   } = {}): Promise<{
     request_id: string;
@@ -468,7 +125,6 @@ export class CombinedPredictionsService {
     const dryRun = options.dryRun ?? false;
     const concurrency = options.concurrency || this.DEFAULT_CONCURRENCY;
     const retryCount = options.retryCount || this.DEFAULT_RETRY_COUNT;
-    const enableAIAnalysis = options.enableAIAnalysis ?? false;
 
     this.log('info', 'Combined predictions processing started', {
       requestId,
@@ -476,8 +132,7 @@ export class CombinedPredictionsService {
       skipPrice,
       dryRun,
       concurrency,
-      retryCount,
-      enableAIAnalysis
+      retryCount
     });
 
     if (!dryRun) {
@@ -489,24 +144,15 @@ export class CombinedPredictionsService {
           limit,
           skipPrice,
           concurrency,
-          retryCount,
-          enableAIAnalysis
+          retryCount
         }
       }).catch((err) => {
         this.log('warn', 'Failed to insert telemetry', { error: err });
       });
     }
 
-    return this.executeProcessing(requestId, limit, skipPrice, dryRun, concurrency, retryCount, enableAIAnalysis, start);
+    return this.executeProcessing(requestId, limit, skipPrice, dryRun, concurrency, retryCount, start);
   }
-
-  /**
-   * Resolve horizon date from post_date and horizon_value heuristics
-   */
-  /**
-   * Resolve horizon start and end dates using AI for complex natural language
-   */
-
 
   /**
    * Reconcile combined_predictions where the horizon date has passed.
@@ -516,30 +162,40 @@ export class CombinedPredictionsService {
     const requestId = options.requestId || crypto.randomUUID?.() || String(Date.now());
     const limit = options.limit ?? 500;
     const dryRun = options.dryRun ?? false;
-    const retryCount = options.retryCount ?? this.DEFAULT_RETRY_COUNT;
 
     this.log('info', 'Reconciling horizon-passed combined predictions', { requestId, limit, dryRun });
 
     try {
+      // Fetch pending predictions
       const { data: rows, error } = await supabaseService.supabase
         .from('combined_predictions')
-        .select('*')
+        .select('id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, sentiment, status')
         .eq('status', 'pending')
         .limit(limit);
 
       if (error) return;
 
+      const now = new Date();
+
       for (const row of rows || []) {
         try {
           const symbol = row.asset || 'UNKNOWN';
+          const postDate = new Date(row.post_date);
+          // Calculate horizon date range
+          const horizonValue = row.horizon_value || '1 month';
+          const horizonType = row.horizon_type || 'custom';
+          const { start: horizonStart, end: horizonEnd } = priceService.calculateHorizonDateRange(postDate, horizonValue, horizonType);
           
-          // Fetch latest price
-          const todayStr = this.formatDateForApi(new Date().toISOString());
-          let actualPrice: number | null = null;
-          
-          // Use getPriceForDate to fetch current price
-          const { price } = await this.getPriceForDate(symbol, todayStr, retryCount, requestId);
-          if (price !== null) actualPrice = price;
+          // If horizon start hasn't passed yet, skip
+          if (now < horizonStart) {
+            continue;
+          }
+
+          this.log('info', `Checking horizon price for ${symbol}`, { 
+            horizonStart: horizonStart.toISOString(), 
+            horizonEnd: horizonEnd.toISOString(),
+            rowId: row.id 
+          });
 
           let targetPriceNum: number | null = null;
           if (row.target_price) {
@@ -547,28 +203,62 @@ export class CombinedPredictionsService {
             if (isNaN(targetPriceNum)) targetPriceNum = null;
           }
 
-          if (actualPrice === null || targetPriceNum === null) continue;
+          let entryPriceNum: number | null = null;
+          if (row.asset_entry_price) {
+            entryPriceNum = parseFloat(String(row.asset_entry_price));
+            if (isNaN(entryPriceNum)) entryPriceNum = null;
+          }
 
-          let resultStatus: 'correct' | 'wrong' | 'pending' = 'pending';
-          const sentiment = (row.sentiment || 'neutral').toString().toLowerCase();
-          
-          if (sentiment === 'bullish') {
-             if (actualPrice >= targetPriceNum) resultStatus = 'correct';
-             else resultStatus = 'wrong';
-           } else if (sentiment === 'bearish') {
-             if (actualPrice <= targetPriceNum) resultStatus = 'correct';
-             else resultStatus = 'wrong';
-           } else {
-             const pct = Math.abs((actualPrice - targetPriceNum) / (targetPriceNum || 1));
-             if (pct <= 0.05) resultStatus = 'correct';
-             else resultStatus = 'wrong';
-           }
+          // If entry price is missing, try to fetch it now for the post_date
+          if (entryPriceNum === null && !dryRun) {
+             const price = await priceService.searchPrice(symbol, postDate, row.asset_type);
+             if (price !== null) {
+               entryPriceNum = price;
+               
+               // Update the database immediately so we don't lose this found price
+               await supabaseService.supabase
+                 .from('combined_predictions')
+                 .update({ 
+                   asset_entry_price: String(price),
+                   updated_at: new Date().toISOString()
+                 })
+                 .eq('id', row.id);
+                 
+               this.log('info', `Found and updated missing entry price for ${symbol}`, { 
+                 id: row.id, 
+                 price: price 
+               });
+             }
+          }
 
-          if (!dryRun) {
+
+          // Verify prediction with range
+          const verificationResult = await priceService.verifyPredictionWithRange(
+            symbol,
+            entryPriceNum,
+            targetPriceNum,
+            row.sentiment || 'neutral',
+            horizonStart,
+            horizonEnd,
+            row.asset_type
+          );
+
+          if (verificationResult.status !== 'pending' && !dryRun) {
             await supabaseService.supabase
               .from('combined_predictions')
-              .update({ status: resultStatus, actual_price: actualPrice, resolved_at: new Date().toISOString() })
+              .update({ 
+                status: verificationResult.status, 
+                actual_price: verificationResult.actualPrice, 
+                resolved_at: new Date().toISOString(),
+                verification_metadata: verificationResult.metDate ? { met_on_date: verificationResult.metDate.toISOString() } : {}
+              })
               .eq('id', row.id);
+              
+            this.log('info', `Resolved prediction ${row.id} as ${verificationResult.status}`, { 
+              symbol, 
+              actualPrice: verificationResult.actualPrice,
+              metDate: verificationResult.metDate
+            });
           }
         } catch (e) {
           this.log('error', 'Error reconciling record', { err: this.safeErrorMessage(e), row });
@@ -577,56 +267,6 @@ export class CombinedPredictionsService {
     } catch (err) {
       this.log('error', 'Unhandled error during reconciliation', { err: this.safeErrorMessage(err) });
     }
-  }
-
-  /**
-   * Check if a target price was hit within a date range
-   */
-  private async checkPriceTargetInRange(
-    symbol: string, 
-    startDate: Date, 
-    endDate: Date, 
-    targetPrice: number, 
-    sentiment: string,
-    requestId: string
-  ): Promise<{ hit: boolean; hitDate: string | null; hitPrice: number | null }> {
-    // Optimization: If range is small (e.g., < 5 days), check daily
-    // If range is large, we might need a range API (like AlphaVantage TIME_SERIES_DAILY)
-    
-    // For now, we'll check the end date (legacy behavior) AND the current date if it's within range
-    // Ideally, we would fetch the full series. Let's try to fetch the series from AlphaVantage.
-    
-    try {
-      if (this.ALPHA_VANTAGE_API_KEY) {
-        const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(symbol)}&apikey=${this.ALPHA_VANTAGE_API_KEY}&outputsize=compact`; // compact = 100 days
-        const resp = await axios.get(url);
-        const series = resp.data?.['Time Series (Daily)'];
-        
-        if (series) {
-          const startStr = startDate.toISOString().split('T')[0];
-          const endStr = endDate.toISOString().split('T')[0];
-          
-          // Iterate through dates in the series
-          for (const [dateStr, data] of Object.entries(series)) {
-            if (dateStr >= startStr && dateStr <= endStr) {
-              const high = parseFloat((data as any)['2. high']);
-              const low = parseFloat((data as any)['3. low']);
-              
-              if (sentiment === 'bullish' && high >= targetPrice) {
-                return { hit: true, hitDate: dateStr, hitPrice: high };
-              }
-              if (sentiment === 'bearish' && low <= targetPrice) {
-                return { hit: true, hitDate: dateStr, hitPrice: low };
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      this.log('warn', 'Failed to check price range', { error: e });
-    }
-    
-    return { hit: false, hitDate: null, hitPrice: null };
   }
 
   /**
@@ -639,7 +279,6 @@ export class CombinedPredictionsService {
     dryRun: boolean,
     concurrency: number,
     retryCount: number,
-    enableAIAnalysis: boolean,
     start: number
   ): Promise<{
     request_id: string;
@@ -653,6 +292,7 @@ export class CombinedPredictionsService {
     let skipped = 0;
     let errorsCount = 0;
     let pricesFetched = 0;
+    let processedRecords = 0;
 
     try {
       // Fetch unprocessed predictions for combining
@@ -693,7 +333,7 @@ export class CombinedPredictionsService {
         }
       }
 
-      const processedRecords = finalRecords?.length || 0;
+      processedRecords = finalRecords?.length || 0;
       this.log('info', `Processing ${processedRecords} records`, { requestId, recordsFound: processedRecords });
 
       // Process each record
@@ -702,8 +342,6 @@ export class CombinedPredictionsService {
           const videoId = rec.video_id;
           const predictions = Array.isArray(rec.predictions) ? rec.predictions : JSON.parse(rec.predictions || '[]');
           const postDateObj = rec.post_date ? new Date(rec.post_date) : new Date();
-          const postDate = postDateObj.toISOString();
-          const postDateFormatted = this.formatDateForApi(postDate);
           
           if (!rec.post_date) {
             this.log('warn', 'Missing post_date for video, defaulting to today', { videoId: rec.video_id });
@@ -733,7 +371,10 @@ export class CombinedPredictionsService {
           // Process each prediction directly
           for (const p of predictions) {
             try {
-              const asset = p.asset || 'UNKNOWN';
+              let asset = p.asset || 'UNKNOWN';
+              // Normalize asset name immediately
+              asset = priceService.normalizeAssetName(asset);
+
               const predictionText = p.prediction_text || '';
               const normalizedKey = this.createNormalizedKey(videoId, asset, predictionText);
 
@@ -749,32 +390,54 @@ export class CombinedPredictionsService {
 
               // Use raw asset as ticker since we removed AI normalization
               const ticker = asset;
-              const currency = '$'; // Default to $
               
+              // Infer asset type if missing
+              let assetType = p.asset_type;
+              if (!assetType) {
+                assetType = this.inferAssetType(asset);
+              }
+
+              // Detect currency based on symbol and asset type
+              const currency = priceService.detectCurrency(ticker, assetType);
+
               // Fetch historical price if enabled
               let entryPrice = null;
               let formattedEntryPrice = null;
               
               if (!skipPrice && rec.post_date) {
-                const { price } = await this.getPriceForDate(ticker, postDateFormatted, retryCount, requestId);
+                const price = await priceService.searchPrice(ticker, postDateObj, assetType);
                 if (price !== null) {
                   entryPrice = String(price);
-                  formattedEntryPrice = `${Math.round(price)}${currency}`;
+                  const symbol = priceService.getCurrencySymbol(currency);
+                  // If symbol is different from ISO code (e.g. $ vs USD), use Prefix ($100). 
+                  // Otherwise use Suffix (100 USD).
+                  if (symbol !== currency) {
+                    formattedEntryPrice = `${symbol}${Math.round(price)}`;
+                  } else {
+                    formattedEntryPrice = `${Math.round(price)} ${currency}`;
+                  }
                   pricesFetched++;
                 }
               }
+
+              // Calculate horizon dates
+              const { start: horizonStart, end: horizonEnd } = priceService.calculateHorizonDateRange(postDateObj, p.horizon?.value || '1 month', p.horizon?.type || 'custom');
 
               // Create combined row
               const combinedRow = {
                 channel_id: rec.channel_id,
                 channel_name: rec.channel_name,
                 video_id: videoId,
-                post_date: postDate,
+                post_date: postDateObj.toISOString(),
                 asset,
+                asset_type: assetType, // New field
                 asset_entry_price: entryPrice,
                 formatted_price: formattedEntryPrice,
                 price_currency: currency,
                 horizon_value: p.horizon?.value || '',
+                horizon_type: p.horizon?.type || 'custom', // New field
+                horizon_start_date: horizonStart.toISOString(), // New field
+                horizon_end_date: horizonEnd.toISOString(), // New field
                 sentiment: p.sentiment || 'neutral',
                 confidence: p.confidence || 'medium',
                 target_price: p.target_price ? String(p.target_price) : null,
@@ -799,6 +462,7 @@ export class CombinedPredictionsService {
               }
 
             } catch (predErr) {
+              this.log('error', 'Error processing single prediction', { err: this.safeErrorMessage(predErr), asset: p.asset });
               errorsCount++;
             }
           }
@@ -811,28 +475,170 @@ export class CombinedPredictionsService {
               .eq('id', rec.id);
           }
 
-        } catch (e) {
+        } catch (err) {
+          this.log('error', 'Error processing record', { err: this.safeErrorMessage(err), videoId: rec.video_id });
           errorsCount++;
-          this.log('error', 'Record processing error', { err: this.safeErrorMessage(e) });
         }
       }
+    } catch (err) {
+      this.log('error', 'Fatal error in executeProcessing', { err: this.safeErrorMessage(err) });
+      errorsCount++;
+    }
 
-      const runtimeMs = Date.now() - start;
-      this.log('info', 'Combined predictions processing completed', { requestId, processed_records: processedRecords, inserted, skipped, errors: errorsCount });
+    const runtime = Date.now() - start;
+    this.log('info', 'Combined predictions processing completed', {
+      requestId,
+      processed: processedRecords,
+      inserted,
+      skipped,
+      errors: errorsCount,
+      pricesFetched,
+      runtimeMs: runtime
+    });
 
-      return {
+    if (!dryRun) {
+      this.insertTelemetry({
+        function: 'combine_predictions',
+        event: 'completed',
         request_id: requestId,
-        processed_records: processedRecords,
+        processed: processedRecords,
         inserted,
         skipped,
         errors: errorsCount,
-        prices_fetched: pricesFetched
-      };
+        prices_fetched: pricesFetched,
+        runtime_ms: runtime
+      }).catch(() => {});
+    }
+
+    return {
+      request_id: requestId,
+      processed_records: processedRecords,
+      inserted,
+      skipped: skipped,
+      errors: errorsCount,
+      prices_fetched: pricesFetched
+    };
+  }
+
+  /**
+   * Infer asset type from asset name
+   */
+  private inferAssetType(asset: string): string {
+    const upper = asset.toUpperCase().trim();
+    
+    // Crypto
+    if (['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'DOT', 'AVAX', 'MATIC', 'LINK', 'UNI', 'ATOM', 'LTC', 'BCH'].includes(upper)) return 'crypto';
+    
+    // Commodities
+    if (['GOLD', 'SILVER', 'CRUDE', 'OIL', 'NATURAL GAS', 'BRENT', 'WTI'].includes(upper)) return 'commodity';
+    
+    // Forex
+    if (['EURUSD', 'USDJPY', 'GBPUSD', 'USDTRY', 'EURTRY', 'XAUUSD'].includes(upper)) return 'fx';
+    
+    // Indices
+    if (['SP500', 'NASDAQ', 'DOW', 'DAX', 'FTSE', 'NIKKEI', 'BIST100', 'BIST30'].includes(upper)) return 'index';
+    
+    // Default to stock
+    return 'stock';
+  }
+
+  /**
+   * Retry fetching missing entry prices for predictions
+   * @param limit - Maximum number of records to process
+   * @param dryRun - If true, will not update the database
+   */
+  async retryMissingEntryPrices(limit: number = 50, dryRun: boolean = false): Promise<{ 
+    processed: number, 
+    updated: number, 
+    failed: number 
+  }> {
+    const requestId = Math.random().toString(36).substring(7);
+    this.log('info', 'Starting entry price retry process', { requestId, limit, dryRun });
+
+    try {
+      // Fetch predictions with null asset_entry_price
+      const { data: rows, error } = await supabaseService.supabase
+        .from('combined_predictions')
+        .select('id, asset, asset_type, post_date')
+        .is('asset_entry_price', null)
+        .limit(limit);
+
+      if (error) {
+        this.log('error', 'Error fetching predictions with missing prices', { error });
+        throw error;
+      }
+
+      if (!rows || rows.length === 0) {
+        this.log('info', 'No predictions found with missing entry prices');
+        return { processed: 0, updated: 0, failed: 0 };
+      }
+
+      let updated = 0;
+      let failed = 0;
+
+      for (const row of rows) {
+        try {
+          const asset = row.asset;
+          const postDate = new Date(row.post_date);
+          
+          // Infer asset type if missing
+          let assetType = row.asset_type;
+          if (!assetType) {
+            assetType = this.inferAssetType(asset);
+          }
+
+          // Fetch price
+          const price = await priceService.searchPrice(asset, postDate, assetType);
+
+          if (price !== null && !dryRun) {
+            // Update the record
+            const { error: updateError } = await supabaseService.supabase
+              .from('combined_predictions')
+              .update({ 
+                asset_entry_price: String(price),
+                asset_type: assetType // Also update asset_type if it was inferred
+              })
+              .eq('id', row.id);
+
+            if (updateError) {
+              this.log('error', 'Error updating entry price', { id: row.id, error: updateError });
+              failed++;
+            } else {
+              this.log('info', `Updated entry price for ${asset}`, { id: row.id, price });
+              updated++;
+            }
+          } else if (price === null) {
+            this.log('warn', `Could not fetch price for ${asset} on ${postDate.toISOString()}`, { id: row.id });
+            failed++;
+          } else {
+            // Dry run with price found
+            this.log('info', `[DRY RUN] Would update ${asset} with price ${price}`, { id: row.id });
+            updated++;
+          }
+
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+        } catch (err) {
+          this.log('error', 'Error processing record', { id: row.id, error: this.safeErrorMessage(err) });
+          failed++;
+        }
+      }
+
+      this.log('info', 'Entry price retry process completed', { 
+        requestId, 
+        processed: rows.length, 
+        updated, 
+        failed 
+      });
+
+      return { processed: rows.length, updated, failed };
+
     } catch (err) {
+      this.log('error', 'Entry price retry process failed', { error: this.safeErrorMessage(err) });
       throw err;
     }
   }
 }
 
-// Export singleton instance
 export const combinedPredictionsService = new CombinedPredictionsService();

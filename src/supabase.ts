@@ -105,7 +105,10 @@ export class SupabaseService {
     try {
       const { error } = await this.client
         .from('finfluencer_channels')
-        .update({ channel_info: info })
+        .update({ 
+          channel_info: info,
+          channel_info_update_date: new Date().toISOString()
+        })
         .eq('channel_id', channelId);
 
       if (error) {

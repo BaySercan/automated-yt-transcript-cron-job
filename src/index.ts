@@ -252,7 +252,6 @@ class FinfluencerTracker {
         dryRun: false,
         concurrency: 3,
         retryCount: 3,
-        enableAIAnalysis: false,
         requestId: `cron_${Date.now()}`
       });
 
