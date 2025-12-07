@@ -40,6 +40,8 @@ class FinfluencerTracker {
     try {
       // Initialize reporting service
       reportingService.initialize();
+      // Initial save to mark run as "running"
+      await reportingService.save();
 
       logger.info("🚀 Starting Finfluencer Tracker Cron Job", {
         version: "2.0.0",
@@ -234,6 +236,20 @@ class FinfluencerTracker {
         const details = await youtubeService.getChannelDetails(
           channel.channel_id
         );
+
+        // Check for channel name change
+        if (details.title && details.title !== channel.channel_name) {
+          logger.info(
+            `🔄 Channel name changed from "${channel.channel_name}" to "${details.title}". Syncing across database...`
+          );
+          await supabaseService.syncChannelName(
+            channel.channel_id,
+            details.title
+          );
+          // Update local reference
+          channel.channel_name = details.title;
+        }
+
         if (details.raw) {
           await supabaseService.updateChannelInfo(
             channel.channel_id,
@@ -269,6 +285,9 @@ class FinfluencerTracker {
         this.stats.errors++;
         reportingService.incrementChannelErrors();
       }
+
+      // Save progress periodically (after each channel)
+      await reportingService.save();
 
       // Small delay between channels to avoid rate limiting
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -849,6 +868,10 @@ class FinfluencerTracker {
     logger.info("🛑 Starting graceful shutdown...");
     this.isShuttingDown = true;
 
+    // Finalize report as partial
+    reportingService.finalize("partial");
+    await reportingService.save();
+
     // Log final Supadata stats
     if (supadataService.isConfigured()) {
       const creditStats = supadataService.getCreditStats();
@@ -881,10 +904,21 @@ async function main(): Promise<void> {
   try {
     await tracker.run();
 
+    // Finalize and save report
+    reportingService.finalize("success");
+    await reportingService.save();
+    reportingService.printCLI();
+
     // Exit with success code
     process.exit(0);
   } catch (error) {
     logger.error("Fatal error in main execution", { error });
+
+    // Finalize and save report as failed
+    reportingService.addError((error as Error).message);
+    reportingService.finalize("failed");
+    await reportingService.save();
+    reportingService.printCLI();
 
     // Exit with error code
     process.exit(1);

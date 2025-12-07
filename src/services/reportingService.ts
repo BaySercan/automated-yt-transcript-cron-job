@@ -233,18 +233,59 @@ class ReportingService {
   /**
    * Save report to database
    */
+  private hasPersisted = false;
+
+  /**
+   * Save report to database (Insert or Update)
+   */
   async save(): Promise<void> {
     try {
-      const { error } = await supabaseService.supabase
-        .from("run_reports")
-        .insert({
-          run_id: this.report.run_id,
-          started_at: this.report.started_at,
-          finished_at: this.report.finished_at,
-          duration_ms: this.report.duration_ms,
-          status: this.report.status,
-          report: this.report,
-        });
+      if (!this.report.run_id) {
+        logger.warn("Cannot save report: run_id is missing");
+        return;
+      }
+
+      // Update timestamp
+      this.report.duration_ms =
+        new Date().getTime() - new Date(this.report.started_at).getTime();
+
+      let error: any;
+
+      if (!this.hasPersisted) {
+        // First save: INSERT
+        const result = await supabaseService.supabase
+          .from("run_reports")
+          .insert({
+            run_id: this.report.run_id,
+            started_at: this.report.started_at,
+            finished_at: this.report.finished_at, // Might be null/empty if running
+            duration_ms: this.report.duration_ms,
+            status: this.report.status,
+            report: this.report,
+          });
+        error = result.error;
+
+        if (!error) {
+          this.hasPersisted = true;
+          logger.debug(`📝 Created run report ${this.report.run_id}`);
+        }
+      } else {
+        // Subsequent save: UPDATE
+        const result = await supabaseService.supabase
+          .from("run_reports")
+          .update({
+            finished_at: this.report.finished_at,
+            duration_ms: this.report.duration_ms,
+            status: this.report.status,
+            report: this.report,
+          })
+          .eq("run_id", this.report.run_id);
+        error = result.error;
+
+        if (!error) {
+          logger.debug(`📝 Updated run report ${this.report.run_id}`);
+        }
+      }
 
       if (error) {
         logger.warn("Failed to save run report to database", {
