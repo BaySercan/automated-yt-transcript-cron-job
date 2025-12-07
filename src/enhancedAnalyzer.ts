@@ -762,45 +762,94 @@ ${transcript}
 
   // Reuse existing utility methods...
   private async sendRequest(prompt: string): Promise<any> {
-    const requestBody = {
-      model: [config.openrouterModel, config.openrouterModel2],
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a multilingual financial analyst AI. Respond with ONLY valid JSON. No markdown, no explanations.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      temperature: config.openrouterTemperature,
-      max_tokens: config.openrouterMaxTokens,
-      response_format: { type: "json_object" },
-    };
-
-    const response = await axios.post(
-      `${config.openrouterBaseUrl}/chat/completions`,
-      requestBody,
-      {
-        headers: {
-          Authorization: `Bearer ${config.openrouterApiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://finfluencer-tracker.com",
-          "X-Title": "Finfluencer Tracker",
-        },
-        timeout: config.requestTimeout,
-      }
+    // Build list of models to try (primary first, then fallback)
+    const models = [config.openrouterModel, config.openrouterModel2].filter(
+      (m) => m && typeof m === "string" && m.trim().length > 0
     );
 
-    if (response.status !== 200) {
-      throw new OpenRouterError(
-        `OpenRouter API returned status ${response.status}`
-      );
+    if (models.length === 0) {
+      throw new OpenRouterError("No valid OpenRouter model configured");
     }
 
-    return response.data;
+    let lastError: Error | null = null;
+
+    for (let i = 0; i < models.length; i++) {
+      const model = models[i]!;
+      const isLastModel = i === models.length - 1;
+
+      try {
+        logger.debug(
+          `🔍 OpenRouter request: model="${model}", prompt_length=${prompt.length}`
+        );
+
+        const requestBody = {
+          model: model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a multilingual financial analyst AI. Respond with ONLY valid JSON. No markdown, no explanations.",
+            },
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          temperature: config.openrouterTemperature,
+          max_tokens: config.openrouterMaxTokens,
+          response_format: { type: "json_object" },
+        };
+
+        const response = await axios.post(
+          `${config.openrouterBaseUrl}/chat/completions`,
+          requestBody,
+          {
+            headers: {
+              Authorization: `Bearer ${config.openrouterApiKey}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": "https://finfluencer-tracker.com",
+              "X-Title": "Finfluencer Tracker",
+            },
+            timeout: config.requestTimeout,
+          }
+        );
+
+        if (response.status !== 200) {
+          throw new OpenRouterError(
+            `OpenRouter API returned status ${response.status}`
+          );
+        }
+
+        return response.data;
+      } catch (error: any) {
+        lastError = error;
+        const statusCode = error.response?.status;
+
+        // Log the failure
+        if (!isLastModel) {
+          logger.warn(
+            `⚠️ Model ${model} failed (${
+              statusCode || error.message
+            }), trying fallback...`
+          );
+        }
+
+        // If this is the last model, we'll throw after the loop
+        if (isLastModel) {
+          break;
+        }
+
+        // Continue to next model for retriable errors (400, 429, 500, 502, 503, 504)
+        const retriableStatusCodes = [400, 429, 500, 502, 503, 504];
+        if (statusCode && !retriableStatusCodes.includes(statusCode)) {
+          // Non-retriable error (like 401 auth), throw immediately
+          throw error;
+        }
+      }
+    }
+
+    // All models failed
+    throw lastError || new OpenRouterError("All models failed");
   }
 
   private parseAnalysisResponse(
@@ -935,6 +984,134 @@ ${transcript}
       predictions: [],
       ai_modifications: [],
     };
+  }
+
+  /**
+   * Get the current model being used (for tracking purposes)
+   */
+  getModelName(): string {
+    return config.openrouterModel || config.openrouterModel2 || "unknown";
+  }
+
+  /**
+   * Verify a reconciliation decision using AI
+   * Acts as a "second opinion" on rule-based correct/wrong determinations
+   */
+  async verifyReconciliationDecision(data: {
+    asset: string;
+    assetType: string;
+    sentiment: string;
+    targetPrice: number | null;
+    entryPrice: number | null;
+    actualPrice: number | null;
+    postDate: string;
+    horizonStart: string;
+    horizonEnd: string;
+    horizonValue: string;
+    ruleBasedDecision: "correct" | "wrong";
+    ruleBasedReasoning: string;
+  }): Promise<{
+    agrees: boolean;
+    finalDecision: "correct" | "wrong" | "inconclusive";
+    confidence: "high" | "medium" | "low";
+    reasoning: string;
+    model: string;
+  }> {
+    const model = this.getModelName();
+
+    const prompt = `You are a financial prediction verification AI. Your task is to verify whether a rule-based decision about a prediction outcome is correct.
+
+## PREDICTION DATA:
+- Asset: ${data.asset} (${data.assetType})
+- Sentiment: ${data.sentiment}
+- Target Price: ${data.targetPrice ?? "Not specified"}
+- Entry Price (at prediction date): ${data.entryPrice ?? "Unknown"}
+- Actual Price (during horizon): ${data.actualPrice ?? "Unknown"}
+- Prediction Date: ${data.postDate}
+- Horizon Period: ${data.horizonValue} (${data.horizonStart} to ${
+      data.horizonEnd
+    })
+
+## RULE-BASED DECISION:
+- Decision: ${data.ruleBasedDecision.toUpperCase()}
+- Reasoning: ${data.ruleBasedReasoning}
+
+## YOUR TASK:
+Evaluate whether the rule-based decision is correct based on the data provided.
+
+For a prediction to be CORRECT:
+- BULLISH sentiment: Price should have increased from entry to actual
+- BEARISH sentiment: Price should have decreased from entry to actual
+- If target_price specified: Actual price should have reached or passed the target
+- Consider the horizon period - only prices within the period matter
+
+For a prediction to be WRONG:
+- The opposite of the above conditions
+
+For INCONCLUSIVE:
+- Missing critical data (no prices available)
+- Ambiguous conditions that can't be determined
+
+## RESPONSE FORMAT (JSON only):
+{
+  "agrees_with_decision": true/false,
+  "final_decision": "correct" | "wrong" | "inconclusive",
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "Brief explanation of your verification"
+}
+
+Respond with ONLY the JSON object, no other text.`;
+
+    try {
+      const response = await retryWithBackoff(
+        async () => this.sendRequest(prompt),
+        2,
+        2000
+      );
+
+      const content = this.extractResponseContent(response);
+      if (!content) {
+        return {
+          agrees: true,
+          finalDecision: data.ruleBasedDecision,
+          confidence: "low",
+          reasoning: "AI verification failed - using rule-based decision",
+          model,
+        };
+      }
+
+      const cleaned = this.cleanJsonResponse(content);
+      const parsed = JSON.parse(cleaned);
+
+      return {
+        agrees: parsed.agrees_with_decision ?? true,
+        finalDecision:
+          this.validateReconciliationDecision(parsed.final_decision) ??
+          data.ruleBasedDecision,
+        confidence: this.validateConfidence(parsed.confidence),
+        reasoning: sanitizeText(parsed.reasoning || "No reasoning provided"),
+        model,
+      };
+    } catch (error) {
+      logger.warn("AI reconciliation verification failed", { error });
+      return {
+        agrees: true,
+        finalDecision: data.ruleBasedDecision,
+        confidence: "low",
+        reasoning: `AI verification error: ${(error as Error).message}`,
+        model,
+      };
+    }
+  }
+
+  private validateReconciliationDecision(
+    decision: any
+  ): "correct" | "wrong" | "inconclusive" {
+    const valid = ["correct", "wrong", "inconclusive"];
+    const normalized = String(decision || "").toLowerCase();
+    return valid.includes(normalized)
+      ? (normalized as "correct" | "wrong" | "inconclusive")
+      : "inconclusive";
   }
 }
 

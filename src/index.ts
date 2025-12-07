@@ -450,6 +450,11 @@ class FinfluencerTracker {
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
 
+      // BACKFILL: Check for any missed videos between START_DATE and last_checked_at
+      if (channel.last_checked_at && !this.isShuttingDown) {
+        await this.backfillMissedVideos(channel, filteredVideos);
+      }
+
       logger.info(`✅ Completed processing channel: ${channel.channel_name}`);
     } catch (error) {
       logger.error(`Error processing channel ${channel.channel_id}`, { error });
@@ -473,6 +478,100 @@ class FinfluencerTracker {
           { error: e }
         );
       }
+    }
+  }
+
+  /**
+   * Backfill: Check for any videos missed between START_DATE and last_checked_at
+   * This ensures all videos are processed even if the process was interrupted
+   */
+  private async backfillMissedVideos(
+    channel: any,
+    alreadyFetchedVideos: any[]
+  ): Promise<void> {
+    try {
+      const startDate = new Date(config.startDate);
+      const lastChecked = new Date(channel.last_checked_at);
+
+      // Only backfill if last_checked_at is after START_DATE
+      if (lastChecked <= startDate) {
+        logger.debug(
+          `No backfill needed for ${channel.channel_name} - already at START_DATE`
+        );
+        return;
+      }
+
+      logger.info(
+        `🔍 Checking for missed videos between ${config.startDate} and ${channel.last_checked_at}`
+      );
+
+      // Fetch all videos from START_DATE to last_checked_at
+      const historicalVideos = await youtubeService.getChannelVideos(
+        channel.channel_id,
+        startDate,
+        lastChecked // Pass end date to limit range
+      );
+
+      // Create a set of already fetched video IDs
+      const alreadyFetchedIds = new Set(
+        alreadyFetchedVideos.map((v) => v.videoId)
+      );
+
+      // Filter to only videos not in the current batch
+      const potentialMissedVideos = historicalVideos.filter(
+        (video) => !alreadyFetchedIds.has(video.videoId)
+      );
+
+      // Filter out live/premiere videos and very short videos
+      const filteredMissed = potentialMissedVideos
+        .filter((video) => !YouTubeService.isLiveOrUpcoming(video))
+        .filter((video) => {
+          const duration = video.duration
+            ? parseYouTubeDuration(video.duration)
+            : 0;
+          return duration >= 60;
+        });
+
+      // Check each video against the database
+      let missedCount = 0;
+      for (const video of filteredMissed) {
+        if (this.isShuttingDown) break;
+
+        const exists = await supabaseService.videoExists(video.videoId);
+        if (!exists) {
+          missedCount++;
+          logger.info(
+            `📥 Found missed video: ${video.title} (${video.videoId})`
+          );
+
+          try {
+            await this.processVideo(video, channel);
+            this.stats.processed_videos++;
+            reportingService.incrementVideosProcessed();
+          } catch (error) {
+            logger.error(`Failed to process missed video ${video.videoId}`, {
+              error,
+            });
+            this.stats.errors++;
+          }
+
+          // Add delay between videos
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+
+      if (missedCount > 0) {
+        logger.info(
+          `✅ Backfill complete: Processed ${missedCount} missed videos for ${channel.channel_name}`
+        );
+      } else {
+        logger.debug(`No missed videos found for ${channel.channel_name}`);
+      }
+    } catch (error) {
+      logger.warn(`Backfill check failed for ${channel.channel_name}`, {
+        error,
+      });
+      // Don't throw - backfill failures shouldn't stop the main process
     }
   }
 
@@ -770,6 +869,7 @@ class FinfluencerTracker {
         hasTranscript: true, // We have a valid transcript
         aiAnalysisSuccess: analysisSuccess,
         hasFinancialContent: hasFinancialContent,
+        aiModel: globalAIAnalyzer.getModelName(),
         context: { isRetry: false },
       });
 

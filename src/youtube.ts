@@ -1,11 +1,19 @@
-import { google, youtube_v3 } from 'googleapis';
-import { config } from './config';
-import { YouTubeVideo, YouTubeError } from './types';
-import { YouTubeError as YouTubeServiceError, TranscriptError } from './errors';
-import { logger, retryWithBackoff, RateLimiter, isValidYouTubeVideoId, isValidYouTubeChannelId, extractVideoIdFromUrl, parseYouTubeDuration } from './utils';
-import { rapidapiService } from './rapidapi';
-import { supadataService } from './supadataService';
-import { supadataRapidAPIService } from './supadataRapidAPIService';
+import { google, youtube_v3 } from "googleapis";
+import { config } from "./config";
+import { YouTubeVideo, YouTubeError } from "./types";
+import { YouTubeError as YouTubeServiceError, TranscriptError } from "./errors";
+import {
+  logger,
+  retryWithBackoff,
+  RateLimiter,
+  isValidYouTubeVideoId,
+  isValidYouTubeChannelId,
+  extractVideoIdFromUrl,
+  parseYouTubeDuration,
+} from "./utils";
+import { rapidapiService } from "./rapidapi";
+import { supadataService } from "./supadataService";
+import { supadataRapidAPIService } from "./supadataRapidAPIService";
 
 export class YouTubeService {
   private youtube: youtube_v3.Youtube;
@@ -13,10 +21,10 @@ export class YouTubeService {
 
   constructor() {
     this.youtube = google.youtube({
-      version: 'v3',
-      auth: config.youtubeApiKey
+      version: "v3",
+      auth: config.youtubeApiKey,
     });
-    
+
     // Rate limit to respect YouTube API quota (10000 units per day)
     this.rateLimiter = new RateLimiter(2); // 2 requests per second
   }
@@ -26,19 +34,22 @@ export class YouTubeService {
     try {
       await this.rateLimiter.wait();
       const response = await this.youtube.channels.list({
-        part: ['id'],
+        part: ["id"],
         maxResults: 1,
-        id: ['UCBR8-60-B28hp2BmDPdntcQ'] // YouTube's official channel
+        id: ["UCBR8-60-B28hp2BmDPdntcQ"], // YouTube's official channel
       });
 
       if (response.status !== 200) {
-        throw new YouTubeServiceError(`YouTube API test failed with status ${response.status}`, { code: response.status });
+        throw new YouTubeServiceError(
+          `YouTube API test failed with status ${response.status}`,
+          { code: response.status }
+        );
       }
 
-      logger.info('YouTube API connection successful');
+      logger.info("YouTube API connection successful");
       return true;
     } catch (error) {
-      logger.error('YouTube API connection test failed', { error });
+      logger.error("YouTube API connection test failed", { error });
       throw error;
     }
   }
@@ -60,12 +71,15 @@ export class YouTubeService {
     try {
       await this.rateLimiter.wait();
       const response = await this.youtube.channels.list({
-        part: ['snippet', 'statistics'],
-        id: [channelId]
+        part: ["snippet", "statistics"],
+        id: [channelId],
       });
 
       if (response.status !== 200) {
-        throw new YouTubeServiceError(`Failed to fetch channel details: HTTP ${response.status}`, { code: response.status });
+        throw new YouTubeServiceError(
+          `Failed to fetch channel details: HTTP ${response.status}`,
+          { code: response.status }
+        );
       }
 
       const channels = response.data.items;
@@ -79,28 +93,41 @@ export class YouTubeService {
 
       return {
         id: channel.id!,
-        title: snippet?.title || 'Unknown Channel',
+        title: snippet?.title || "Unknown Channel",
         description: snippet?.description,
         publishedAt: snippet?.publishedAt || new Date().toISOString(),
-        subscriberCount: statistics?.subscriberCount ? parseInt(statistics.subscriberCount) : undefined,
-        videoCount: statistics?.videoCount ? parseInt(statistics.videoCount) : undefined,
+        subscriberCount: statistics?.subscriberCount
+          ? parseInt(statistics.subscriberCount)
+          : undefined,
+        videoCount: statistics?.videoCount
+          ? parseInt(statistics.videoCount)
+          : undefined,
         // Return full raw info for storage
         raw: {
           snippet,
-          statistics
-        }
+          statistics,
+        },
       };
     } catch (error) {
       if (error instanceof YouTubeServiceError) {
         throw error;
       }
-      logger.error(`Error fetching channel details for ${channelId}`, { error });
-      throw new YouTubeServiceError(`Failed to fetch channel details: ${(error as Error).message}`, { cause: error });
+      logger.error(`Error fetching channel details for ${channelId}`, {
+        error,
+      });
+      throw new YouTubeServiceError(
+        `Failed to fetch channel details: ${(error as Error).message}`,
+        { cause: error }
+      );
     }
   }
 
-  // Get videos from channel since specific date
-  async getChannelVideos(channelId: string, publishedAfter: Date): Promise<YouTubeVideo[]> {
+  // Get videos from channel since specific date (optionally until another date)
+  async getChannelVideos(
+    channelId: string,
+    publishedAfter: Date,
+    publishedBefore?: Date
+  ): Promise<YouTubeVideo[]> {
     if (!isValidYouTubeChannelId(channelId)) {
       throw new YouTubeServiceError(`Invalid channel ID format: ${channelId}`);
     }
@@ -109,28 +136,35 @@ export class YouTubeService {
       const videos: YouTubeVideo[] = [];
       let nextPageToken: string | undefined = undefined;
       const publishedAfterISO = publishedAfter.toISOString();
+      const publishedBeforeISO = publishedBefore?.toISOString();
 
       do {
         await this.rateLimiter.wait();
         const response = await this.youtube.search.list({
-          part: ['snippet'],
+          part: ["snippet"],
           channelId: channelId,
-          type: ['video'],
+          type: ["video"],
           publishedAfter: publishedAfterISO,
+          ...(publishedBeforeISO && { publishedBefore: publishedBeforeISO }),
           maxResults: config.youtubeMaxResults,
-          order: 'date',
-          pageToken: nextPageToken
+          order: "date",
+          pageToken: nextPageToken,
         });
 
         if (response.status !== 200) {
-          throw new YouTubeServiceError(`Failed to fetch channel videos: HTTP ${response.status}`, { code: response.status });
+          throw new YouTubeServiceError(
+            `Failed to fetch channel videos: HTTP ${response.status}`,
+            { code: response.status }
+          );
         }
 
         const items = response.data.items;
         if (!items) break;
 
         // Get detailed video information for each video
-        const videoIds = items.map(item => item.id?.videoId).filter(Boolean) as string[];
+        const videoIds = items
+          .map((item) => item.id?.videoId)
+          .filter(Boolean) as string[];
         if (videoIds.length > 0) {
           const detailedVideos = await this.getVideoDetails(videoIds);
           videos.push(...detailedVideos);
@@ -140,18 +174,23 @@ export class YouTubeService {
 
         // Add small delay to avoid rate limiting
         if (nextPageToken) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
       } while (nextPageToken);
 
-      logger.info(`Fetched ${videos.length} videos for channel ${channelId} since ${publishedAfterISO}`);
+      logger.info(
+        `Fetched ${videos.length} videos for channel ${channelId} since ${publishedAfterISO}`
+      );
       return videos;
     } catch (error) {
       if (error instanceof YouTubeServiceError) {
         throw error;
       }
       logger.error(`Error fetching videos for channel ${channelId}`, { error });
-      throw new YouTubeServiceError(`Failed to fetch channel videos: ${(error as Error).message}`, { cause: error });
+      throw new YouTubeServiceError(
+        `Failed to fetch channel videos: ${(error as Error).message}`,
+        { cause: error }
+      );
     }
   }
 
@@ -160,42 +199,51 @@ export class YouTubeService {
     try {
       await this.rateLimiter.wait();
       const response = await this.youtube.videos.list({
-        part: ['snippet', 'contentDetails'],
-        id: videoIds
+        part: ["snippet", "contentDetails"],
+        id: videoIds,
       });
 
       if (response.status !== 200) {
-        throw new YouTubeServiceError(`Failed to fetch video details: HTTP ${response.status}`, { code: response.status });
+        throw new YouTubeServiceError(
+          `Failed to fetch video details: HTTP ${response.status}`,
+          { code: response.status }
+        );
       }
 
       const items = response.data.items;
       if (!items) return [];
 
-      return items.map(item => {
+      return items.map((item) => {
         const snippet = item.snippet;
         const contentDetails = item.contentDetails;
 
         return {
           videoId: item.id!,
-          title: snippet?.title || 'Untitled Video',
+          title: snippet?.title || "Untitled Video",
           publishedAt: snippet?.publishedAt || new Date().toISOString(),
-          channelId: snippet?.channelId || '',
-          channelTitle: snippet?.channelTitle || 'Unknown Channel',
+          channelId: snippet?.channelId || "",
+          channelTitle: snippet?.channelTitle || "Unknown Channel",
           description: snippet?.description,
           duration: contentDetails?.duration,
           defaultLanguage: snippet?.defaultLanguage,
-          defaultAudioLanguage: snippet?.defaultAudioLanguage
+          defaultAudioLanguage: snippet?.defaultAudioLanguage,
         };
       });
     } catch (error) {
-      logger.error('Error fetching video details', { error, videoIds });
-      throw new YouTubeServiceError(`Failed to fetch video details: ${(error as Error).message}`, { cause: error });
+      logger.error("Error fetching video details", { error, videoIds });
+      throw new YouTubeServiceError(
+        `Failed to fetch video details: ${(error as Error).message}`,
+        { cause: error }
+      );
     }
   }
 
   // Get transcript for a video using 3-tier fallback system
   // Returns a structured result so callers can handle 'no transcript' gracefully
-  async getVideoTranscript(videoId: string, videoLanguage?: string): Promise<{ transcript: string | null; error?: string }> {
+  async getVideoTranscript(
+    videoId: string,
+    videoLanguage?: string
+  ): Promise<{ transcript: string | null; error?: string }> {
     if (!isValidYouTubeVideoId(videoId)) {
       return { transcript: null, error: `invalid_video_id:${videoId}` };
     }
@@ -204,100 +252,134 @@ export class YouTubeService {
       // ========== TIER 1: RAPIDAPI (Primary) ==========
       if (rapidapiService.isConfigured()) {
         try {
-          logger.info(`🎯 [TIER 1] Fetching transcript from RapidAPI for video ${videoId}`);
+          logger.info(
+            `🎯 [TIER 1] Fetching transcript from RapidAPI for video ${videoId}`
+          );
           const startTime = Date.now();
-          
+
           const transcript = await rapidapiService.getVideoTranscript(videoId);
-          
+
           if (transcript && transcript.trim().length > 0) {
             const duration = Date.now() - startTime;
-            logger.info(`✅ [TIER 1 SUCCESS] RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
+            logger.info(
+              `✅ [TIER 1 SUCCESS] RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
+            );
             return { transcript };
           }
         } catch (error) {
-          const isRateLimitError = (error as Error).message.includes('429') || 
-                                  (error as Error).message.includes('rate limit');
-          const errorType = isRateLimitError ? 'rate_limited' : 'failed';
-          
-          logger.warn(`❌ [TIER 1 ${errorType.toUpperCase()}] RapidAPI transcript failed for video ${videoId}, trying Tier 2`, { 
-            error: (error as Error).message,
-            service: 'rapidapi'
-          });
+          const isRateLimitError =
+            (error as Error).message.includes("429") ||
+            (error as Error).message.includes("rate limit");
+          const errorType = isRateLimitError ? "rate_limited" : "failed";
+
+          logger.warn(
+            `❌ [TIER 1 ${errorType.toUpperCase()}] RapidAPI transcript failed for video ${videoId}, trying Tier 2`,
+            {
+              error: (error as Error).message,
+              service: "rapidapi",
+            }
+          );
         }
       }
 
       // ========== TIER 2: SUPADATA RAPIDAPI (Secondary) ==========
       if (supadataRapidAPIService.isConfigured()) {
         try {
-          logger.info(`🎯 [TIER 2] Fetching transcript from Supadata RapidAPI for video ${videoId}`);
+          logger.info(
+            `🎯 [TIER 2] Fetching transcript from Supadata RapidAPI for video ${videoId}`
+          );
           const startTime = Date.now();
-          
-          const transcript = await supadataRapidAPIService.getVideoTranscript(videoId);
-          
+
+          const transcript = await supadataRapidAPIService.getVideoTranscript(
+            videoId
+          );
+
           if (transcript && transcript.trim().length > 0) {
             const duration = Date.now() - startTime;
-            logger.info(`✅ [TIER 2 SUCCESS] Supadata RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
+            logger.info(
+              `✅ [TIER 2 SUCCESS] Supadata RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
+            );
             return { transcript };
           }
         } catch (error) {
-          const isRateLimitError = (error as Error).message.includes('429') || 
-                                  (error as Error).message.includes('rate limit');
-          const isCreditError = (error as Error).message.includes('insufficient') || 
-                               (error as Error).message.includes('credit');
-          
-          let errorType = 'failed';
-          if (isRateLimitError) errorType = 'rate_limited';
-          else if (isCreditError) errorType = 'credits_exhausted';
-          
-          logger.warn(`❌ [TIER 2 ${errorType.toUpperCase()}] Supadata RapidAPI transcript failed for video ${videoId}, trying Tier 3`, { 
-            error: (error as Error).message,
-            service: 'supadata-rapidapi'
-          });
+          const isRateLimitError =
+            (error as Error).message.includes("429") ||
+            (error as Error).message.includes("rate limit");
+          const isCreditError =
+            (error as Error).message.includes("insufficient") ||
+            (error as Error).message.includes("credit");
+
+          let errorType = "failed";
+          if (isRateLimitError) errorType = "rate_limited";
+          else if (isCreditError) errorType = "credits_exhausted";
+
+          logger.warn(
+            `❌ [TIER 2 ${errorType.toUpperCase()}] Supadata RapidAPI transcript failed for video ${videoId}, trying Tier 3`,
+            {
+              error: (error as Error).message,
+              service: "supadata-rapidapi",
+            }
+          );
         }
       }
 
       // ========== TIER 3: SUPADATA DIRECT (Tertiary) ==========
       if (supadataService.isConfigured()) {
         try {
-          logger.info(`🎯 [TIER 3] Fetching transcript from Supadata Direct for video ${videoId}`);
+          logger.info(
+            `🎯 [TIER 3] Fetching transcript from Supadata Direct for video ${videoId}`
+          );
           const startTime = Date.now();
-          
+
           const transcript = await supadataService.getVideoTranscript(videoId);
-          
+
           if (transcript && transcript.trim().length > 0) {
             const duration = Date.now() - startTime;
-            logger.info(`✅ [TIER 3 SUCCESS] Supadata Direct transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`);
+            logger.info(
+              `✅ [TIER 3 SUCCESS] Supadata Direct transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
+            );
             return { transcript };
           }
         } catch (error) {
-          const isCreditError = (error as Error).message.includes('insufficient') || 
-                               (error as Error).message.includes('credit');
-          
+          const isCreditError =
+            (error as Error).message.includes("insufficient") ||
+            (error as Error).message.includes("credit");
+
           if (isCreditError) {
-            logger.error(`💳 [TIER 3 CREDITS EXHAUSTED] Supadata Direct credits exhausted for video ${videoId}`, { 
-              error: (error as Error).message,
-              service: 'supadata-direct'
-            });
-            return { transcript: null, error: 'supadata_credits_exhausted' };
+            logger.error(
+              `💳 [TIER 3 CREDITS EXHAUSTED] Supadata Direct credits exhausted for video ${videoId}`,
+              {
+                error: (error as Error).message,
+                service: "supadata-direct",
+              }
+            );
+            return { transcript: null, error: "supadata_credits_exhausted" };
           }
-          
-          logger.warn(`❌ [TIER 3 FAILED] Supadata Direct transcript failed for video ${videoId}`, { 
-            error: (error as Error).message,
-            service: 'supadata-direct'
-          });
+
+          logger.warn(
+            `❌ [TIER 3 FAILED] Supadata Direct transcript failed for video ${videoId}`,
+            {
+              error: (error as Error).message,
+              service: "supadata-direct",
+            }
+          );
         }
       }
 
       // ========== ALL TIERS FAILED ==========
-      logger.error(`💥 [ALL TIERS FAILED] No transcript available for video ${videoId} from any service`);
-      return { transcript: null, error: 'no_transcript_available' };
-      
+      logger.error(
+        `💥 [ALL TIERS FAILED] No transcript available for video ${videoId} from any service`
+      );
+      return { transcript: null, error: "no_transcript_available" };
     } catch (error) {
       const msg = (error as Error).message || String(error);
-      logger.error(`💥 [SYSTEM ERROR] All transcript APIs failed for video ${videoId}`, { 
-        error: msg,
-        videoId
-      });
+      logger.error(
+        `💥 [SYSTEM ERROR] All transcript APIs failed for video ${videoId}`,
+        {
+          error: msg,
+          videoId,
+        }
+      );
       return { transcript: null, error: `transcript_error:${msg}` };
     }
   }
@@ -313,7 +395,9 @@ export class YouTubeService {
   // Safely attempt to extract a transcript-like block from a description
   // IMPORTANT: by design this MUST NOT synthesize a transcript from metadata.
   // We return null here to explicitly avoid generating transcripts from title/description.
-  private extractTranscriptFromDescription(description?: string): string | null {
+  private extractTranscriptFromDescription(
+    description?: string
+  ): string | null {
     // Do not synthesize — always return null so calling code must rely on real captions
     return null;
   }
@@ -329,12 +413,19 @@ export class YouTubeService {
       return videos.length > 0 ? videos[0] : null;
     } catch (error) {
       logger.error(`Error fetching metadata for video ${videoId}`, { error });
-      throw new YouTubeServiceError(`Failed to fetch video metadata: ${(error as Error).message}`, { cause: error });
+      throw new YouTubeServiceError(
+        `Failed to fetch video metadata: ${(error as Error).message}`,
+        { cause: error }
+      );
     }
   }
 
   // Search for videos by query (useful for finding finfluencer content)
-  async searchVideos(query: string, maxResults: number = 25, publishedAfter?: Date): Promise<YouTubeVideo[]> {
+  async searchVideos(
+    query: string,
+    maxResults: number = 25,
+    publishedAfter?: Date
+  ): Promise<YouTubeVideo[]> {
     try {
       const videos: YouTubeVideo[] = [];
       let nextPageToken: string | undefined = undefined;
@@ -342,12 +433,12 @@ export class YouTubeService {
       do {
         await this.rateLimiter.wait();
         const searchParams: any = {
-          part: ['snippet'],
-          type: ['video'],
+          part: ["snippet"],
+          type: ["video"],
           q: query,
           maxResults: Math.min(maxResults, 50),
-          order: 'relevance',
-          pageToken: nextPageToken
+          order: "relevance",
+          pageToken: nextPageToken,
         };
 
         if (publishedAfter) {
@@ -357,14 +448,19 @@ export class YouTubeService {
         const response = await this.youtube.search.list(searchParams);
 
         if (response.status !== 200) {
-          throw new YouTubeServiceError(`Failed to search videos: HTTP ${response.status}`, { code: response.status });
+          throw new YouTubeServiceError(
+            `Failed to search videos: HTTP ${response.status}`,
+            { code: response.status }
+          );
         }
 
         const items = response.data.items;
         if (!items) break;
 
         // Get detailed video information
-        const videoIds = items.map(item => item.id?.videoId).filter(Boolean) as string[];
+        const videoIds = items
+          .map((item) => item.id?.videoId)
+          .filter(Boolean) as string[];
         if (videoIds.length > 0) {
           const detailedVideos = await this.getVideoDetails(videoIds);
           videos.push(...detailedVideos);
@@ -372,14 +468,16 @@ export class YouTubeService {
 
         nextPageToken = response.data.nextPageToken || undefined;
         if (nextPageToken && videos.length >= maxResults) break;
-
       } while (nextPageToken && videos.length < maxResults);
 
       logger.info(`Found ${videos.length} videos for query: "${query}"`);
       return videos.slice(0, maxResults);
     } catch (error) {
       logger.error(`Error searching videos for query: "${query}"`, { error });
-      throw new YouTubeServiceError(`Failed to search videos: ${(error as Error).message}`, { cause: error });
+      throw new YouTubeServiceError(
+        `Failed to search videos: ${(error as Error).message}`,
+        { cause: error }
+      );
     }
   }
 
@@ -391,23 +489,33 @@ export class YouTubeService {
   // Check if video is live or upcoming (skip these for transcript processing)
   static isLiveOrUpcoming(video: YouTubeVideo): boolean {
     const title = video.title.toLowerCase();
-    const description = (video.description || '').toLowerCase();
-    
-    const liveKeywords = ['live', 'premiere', 'upcoming', 'stream', 'broadcast'];
-    
-    return liveKeywords.some(keyword => 
-      title.includes(keyword) || description.includes(keyword)
+    const description = (video.description || "").toLowerCase();
+
+    const liveKeywords = [
+      "live",
+      "premiere",
+      "upcoming",
+      "stream",
+      "broadcast",
+    ];
+
+    return liveKeywords.some(
+      (keyword) => title.includes(keyword) || description.includes(keyword)
     );
   }
 
   // Filter videos by duration (skip very short or very long videos)
-  static filterByDuration(videos: YouTubeVideo[], minMinutes: number = 1, maxMinutes: number = 180): YouTubeVideo[] {
-    return videos.filter(video => {
+  static filterByDuration(
+    videos: YouTubeVideo[],
+    minMinutes: number = 1,
+    maxMinutes: number = 180
+  ): YouTubeVideo[] {
+    return videos.filter((video) => {
       if (!video.duration) return true; // Include if duration unknown
-      
+
       const durationSeconds = parseYouTubeDuration(video.duration);
       const durationMinutes = durationSeconds / 60;
-      
+
       return durationMinutes >= minMinutes && durationMinutes <= maxMinutes;
     });
   }
@@ -427,7 +535,7 @@ export class YouTubeService {
     return {
       daily: estimatedUsage,
       percentage: Math.round(percentage * 100) / 100,
-      remaining
+      remaining,
     };
   }
 
@@ -437,7 +545,7 @@ export class YouTubeService {
       rapidapi: rapidapiService.getRateLimitStats(),
       supadataRapidAPI: supadataRapidAPIService.getRateLimitStats(),
       supadata: supadataService.getRateLimitStats(),
-      supadataCredits: supadataService.getCreditStats()
+      supadataCredits: supadataService.getCreditStats(),
     };
   }
 }

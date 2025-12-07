@@ -253,6 +253,7 @@ export class SupabaseService {
     hasTranscript?: boolean; // Was transcript successfully retrieved?
     aiAnalysisSuccess?: boolean; // Did AI analysis complete successfully?
     hasFinancialContent?: boolean; // Is this financial content?
+    aiModel?: string; // AI model used for analysis
 
     // Context for status determination
     context: {
@@ -277,6 +278,7 @@ export class SupabaseService {
         hasTranscript = false,
         aiAnalysisSuccess = false,
         hasFinancialContent = true,
+        aiModel,
         context,
       } = params;
 
@@ -301,6 +303,7 @@ export class SupabaseService {
         transcript_summary: transcriptSummary,
         predictions: predictions,
         ai_modifications: aiModifications,
+        ai_model: aiModel,
         updated_at: new Date().toISOString(),
       };
 

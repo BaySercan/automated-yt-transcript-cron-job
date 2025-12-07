@@ -4,6 +4,7 @@ import { logger } from "./utils";
 import { supabaseService } from "./supabase";
 import { priceService } from "./services/priceService";
 import { reportingService } from "./services/reportingService";
+import { globalAIAnalyzer } from "./enhancedAnalyzer";
 
 /**
  * Combined Predictions Service
@@ -285,25 +286,115 @@ export class CombinedPredictionsService {
             );
 
           if (verificationResult.status !== "pending" && !dryRun) {
+            let finalStatus = verificationResult.status;
+            let aiReconciliationAgrees: boolean | null = null;
+            let aiReconciliationReasoning: string | null = null;
+            let aiModelReconciliation: string | null = null;
+
+            // AI Verification (if enabled)
+            if (
+              options.useAI &&
+              (verificationResult.status === "correct" ||
+                verificationResult.status === "wrong")
+            ) {
+              try {
+                this.log("info", `🤖 Running AI verification for ${symbol}`, {
+                  rowId: row.id,
+                });
+
+                const aiResult =
+                  await globalAIAnalyzer.verifyReconciliationDecision({
+                    asset: symbol,
+                    assetType: row.asset_type || "unknown",
+                    sentiment: row.sentiment || "neutral",
+                    targetPrice: targetPriceNum,
+                    entryPrice: entryPriceNum,
+                    actualPrice: verificationResult.actualPrice,
+                    postDate: row.post_date,
+                    horizonStart: horizonStart.toISOString().split("T")[0],
+                    horizonEnd: horizonEnd.toISOString().split("T")[0],
+                    horizonValue: horizonValue,
+                    ruleBasedDecision: verificationResult.status as
+                      | "correct"
+                      | "wrong",
+                    ruleBasedReasoning: `Entry: ${entryPriceNum}, Actual: ${verificationResult.actualPrice}, Target: ${targetPriceNum}, Sentiment: ${row.sentiment}`,
+                  });
+
+                aiReconciliationAgrees = aiResult.agrees;
+                aiReconciliationReasoning = aiResult.reasoning;
+                aiModelReconciliation = aiResult.model;
+
+                // If AI disagrees with high confidence, use AI's decision
+                if (!aiResult.agrees && aiResult.confidence === "high") {
+                  this.log(
+                    "warn",
+                    `⚠️ AI disagrees with rule-based decision for ${symbol}`,
+                    {
+                      rowId: row.id,
+                      ruleBasedDecision: verificationResult.status,
+                      aiDecision: aiResult.finalDecision,
+                      aiReasoning: aiResult.reasoning,
+                    }
+                  );
+
+                  if (aiResult.finalDecision !== "inconclusive") {
+                    finalStatus = aiResult.finalDecision;
+                  }
+                } else {
+                  this.log(
+                    "info",
+                    `✅ AI ${
+                      aiResult.agrees ? "agrees" : "disagrees (low confidence)"
+                    } with decision for ${symbol}`,
+                    {
+                      confidence: aiResult.confidence,
+                    }
+                  );
+                }
+              } catch (aiError) {
+                this.log(
+                  "warn",
+                  `AI verification failed for ${symbol}, using rule-based decision`,
+                  {
+                    error: this.safeErrorMessage(aiError),
+                  }
+                );
+              }
+            }
+
             await supabaseService.supabase
               .from("combined_predictions")
               .update({
-                status: verificationResult.status,
+                status: finalStatus,
                 actual_price: verificationResult.actualPrice,
                 resolved_at: new Date().toISOString(),
                 verification_metadata: verificationResult.metDate
                   ? { met_on_date: verificationResult.metDate.toISOString() }
                   : {},
+                ...(aiModelReconciliation && {
+                  ai_model_reconciliation: aiModelReconciliation,
+                }),
+                ...(aiReconciliationAgrees !== null && {
+                  ai_reconciliation_agrees: aiReconciliationAgrees,
+                }),
+                ...(aiReconciliationReasoning && {
+                  ai_reconciliation_reasoning: aiReconciliationReasoning,
+                }),
               })
               .eq("id", row.id);
 
             this.log(
               "info",
-              `Resolved prediction ${row.id} as ${verificationResult.status}`,
+              `Resolved prediction ${row.id} as ${finalStatus}${
+                options.useAI
+                  ? ` (AI ${aiReconciliationAgrees ? "agreed" : "overrode"})`
+                  : ""
+              }`,
               {
                 symbol,
                 actualPrice: verificationResult.actualPrice,
                 metDate: verificationResult.metDate,
+                aiUsed: !!options.useAI,
               }
             );
           }
