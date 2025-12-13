@@ -61,6 +61,9 @@ class FinfluencerTracker {
       // Process failed predictions (idle-time retry)
       await this.processFailedPredictions();
 
+      // Analyze unprocessed transcripts with pagination
+      await this.analyzeUnprocessedTranscripts();
+
       // Process combined predictions (AI enrichment + price data)
       await this.processCombinedPredictions();
 
@@ -329,6 +332,140 @@ class FinfluencerTracker {
       logger.error("❌ Retry processing failed", { error });
       this.stats.errors++;
       // Don't throw - retry failures shouldn't stop the main process
+    }
+  }
+
+  // Analyze transcripts that have been extracted but not yet analyzed
+  private async analyzeUnprocessedTranscripts(): Promise<void> {
+    try {
+      logger.info("🔍 Analyzing unprocessed transcripts...");
+
+      const BATCH_SIZE = 50;  // Process in batches of 50
+      let offset = 0;
+      let totalAnalyzed = 0;
+      let hasMoreRecords = true;
+
+      while (hasMoreRecords) {
+        // Query for records with transcripts but no analysis (subject_outcome is NULL or ai_model is NULL)
+        const { data: unprocessedRecords, error: queryError } = await supabaseService.getClient()
+          .from("finfluencer_predictions")
+          .select("*")
+          .is("subject_outcome", null)
+          .or("ai_model.is.null", { referencedTable: "finfluencer_predictions" })
+          .not("raw_transcript", "is", null)
+          .order("created_at", { ascending: true })
+          .range(offset, offset + BATCH_SIZE - 1);  // Pagination instead of limit
+
+        if (queryError) {
+          logger.error("Failed to query unprocessed transcripts", { error: queryError });
+          break;  // Exit loop on error
+        }
+
+        if (!unprocessedRecords || unprocessedRecords.length === 0) {
+          hasMoreRecords = false;
+          logger.info("✅ All transcripts have been analyzed");
+          break;
+        }
+
+        const batchNumber = Math.floor(offset / BATCH_SIZE) + 1;
+        logger.info(`📝 Processing batch ${batchNumber}: Found ${unprocessedRecords.length} unprocessed transcripts`, {
+          batchNumber,
+          count: unprocessedRecords.length,
+          offset,
+        });
+
+        let analyzedCount = 0;
+        let failedCount = 0;
+
+        for (const record of unprocessedRecords) {
+          try {
+            if (!record.raw_transcript) {
+              logger.warn(`⚠️ Record ${record.id} has no transcript content, skipping`);
+              continue;
+            }
+
+            logger.info(`📊 Analyzing unprocessed transcript: ${record.video_id}`, {
+              videoId: record.video_id,
+              channelId: record.channel_id,
+            });
+
+            // Run AI analysis
+            const analysis = await globalAIAnalyzer.analyzeTranscript(
+              record.raw_transcript,
+              record.language || "english"
+            );
+
+            if (!analysis) {
+              logger.warn(`⚠️ No analysis produced for video ${record.video_id}`);
+              failedCount++;
+              continue;
+            }
+
+            // Update the record with analysis results
+            const { error: updateError } = await supabaseService.getClient()
+              .from("finfluencer_predictions")
+              .update({
+                subject_outcome: analysis.subject_outcome || "analyzed",
+                predictions: analysis.predictions || [],
+                ai_modifications: analysis.ai_modifications || [],
+                ai_model: globalAIAnalyzer.getModelName(),
+                language: record.language || "english",
+                transcript_length: record.raw_transcript.length,
+                predictions_found: (analysis.predictions || []).length,
+              })
+              .eq("id", record.id);
+
+            if (updateError) {
+              logger.error(`Failed to update record ${record.id}`, { error: updateError });
+              failedCount++;
+              continue;
+            }
+
+            analyzedCount++;
+            logger.info(`✅ Updated record with analysis results`, {
+              videoId: record.video_id,
+              predictionsFound: (analysis.predictions || []).length,
+            });
+          } catch (error) {
+            logger.error(`Failed to analyze transcript for ${record.video_id}`, { error });
+            failedCount++;
+            continue;
+          }
+        }
+
+        totalAnalyzed += analyzedCount;
+        logger.info("✅ Batch analysis completed", {
+          batchNumber,
+          analyzedCount,
+          failedCount,
+          totalProcessed: analyzedCount + failedCount,
+          totalSoFar: totalAnalyzed,
+        });
+
+        // Update statistics
+        this.stats.processed_videos += analyzedCount;
+
+        // Move to next batch
+        offset += BATCH_SIZE;
+        
+        // If batch wasn't full, we've processed all records
+        if (unprocessedRecords.length < BATCH_SIZE) {
+          hasMoreRecords = false;
+        }
+
+        // Add delay between batches to avoid rate limiting
+        if (hasMoreRecords) {
+          await new Promise(resolve => setTimeout(resolve, 2000));  // 2 second delay
+        }
+      }
+
+      logger.info("✅ All unprocessed transcripts analysis completed", {
+        totalAnalyzed,
+      });
+    } catch (error) {
+      logger.error("❌ Unprocessed transcript analysis failed", { error });
+      this.stats.errors++;
+      // Don't throw - this shouldn't stop the main process
     }
   }
 

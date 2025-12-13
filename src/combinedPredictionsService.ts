@@ -4,6 +4,7 @@ import { logger } from "./utils";
 import { supabaseService } from "./supabase";
 import { priceService } from "./services/priceService";
 import { reportingService } from "./services/reportingService";
+import { assetClassifierService } from "./services/assetClassifierService";
 import { globalAIAnalyzer } from "./enhancedAnalyzer";
 
 /**
@@ -362,25 +363,42 @@ export class CombinedPredictionsService {
               }
             }
 
+            // Build update object with all AI fields ensured to be set
+            const updateData: Record<string, any> = {
+              status: finalStatus,
+              actual_price: verificationResult.actualPrice,
+              resolved_at: new Date().toISOString(),
+              verification_metadata: verificationResult.metDate
+                ? { met_on_date: verificationResult.metDate.toISOString() }
+                : {},
+            };
+
+            // Set reconciliation model if AI was used
+            if (aiModelReconciliation) {
+              updateData.ai_model_reconciliation = aiModelReconciliation;
+              // ai_model_extraction represents the extraction model used originally
+              // If reconciliation used a model, use the same for extraction for consistency
+              updateData.ai_model_extraction = aiModelReconciliation;
+            }
+
+            // Set reconciliation agreement flag
+            if (aiReconciliationAgrees !== null) {
+              updateData.ai_reconciliation_agrees = aiReconciliationAgrees;
+            }
+
+            // Always set reasoning (even if it's the rule-based one)
+            if (aiReconciliationReasoning) {
+              updateData.ai_reconciliation_reasoning = aiReconciliationReasoning;
+            } else {
+              // Fallback to rule-based reasoning
+              updateData.ai_reconciliation_reasoning = finalStatus === 'correct' 
+                ? 'Rule-based verification: Prediction target met'
+                : 'Rule-based verification: Prediction target not met';
+            }
+
             await supabaseService.supabase
               .from("combined_predictions")
-              .update({
-                status: finalStatus,
-                actual_price: verificationResult.actualPrice,
-                resolved_at: new Date().toISOString(),
-                verification_metadata: verificationResult.metDate
-                  ? { met_on_date: verificationResult.metDate.toISOString() }
-                  : {},
-                ...(aiModelReconciliation && {
-                  ai_model_reconciliation: aiModelReconciliation,
-                }),
-                ...(aiReconciliationAgrees !== null && {
-                  ai_reconciliation_agrees: aiReconciliationAgrees,
-                }),
-                ...(aiReconciliationReasoning && {
-                  ai_reconciliation_reasoning: aiReconciliationReasoning,
-                }),
-              })
+              .update(updateData)
               .eq("id", row.id);
 
             this.log(
@@ -566,35 +584,59 @@ export class CombinedPredictionsService {
               // Use raw asset as ticker since we removed AI normalization
               const ticker = asset;
 
-              // Infer asset type if missing
+              // Infer asset type and currency using AI classifier
               let assetType = p.asset_type;
+              let currency = "USD"; // default
+              let currencySymbol = "$"; // default symbol
+
               if (!assetType) {
-                assetType = this.inferAssetType(asset);
+                try {
+                  const classification = await assetClassifierService.classifyAsset(
+                    asset,
+                    p.prediction_text || ""
+                  );
+                  assetType = classification.assetType;
+                  currency = classification.currency;
+                  currencySymbol = classification.currencySymbol;
+
+                  this.log("info", `Classified asset ${asset}`, {
+                    assetType,
+                    currency,
+                    currencySymbol,
+                    confidence: classification.confidence,
+                  });
+                } catch (classifyErr) {
+                  // Fallback to basic inference if AI fails
+                  this.log("warn", `Asset classification failed for ${asset}, using fallback`, {
+                    error: this.safeErrorMessage(classifyErr),
+                  });
+                  assetType = this.inferAssetType(asset);
+                  currency = priceService.detectCurrency(ticker, assetType);
+                  currencySymbol = priceService.getCurrencySymbol(currency);
+                }
               }
 
-              // Detect currency based on symbol and asset type
-              const currency = priceService.detectCurrency(ticker, assetType);
-
               // Fetch historical price if enabled
+              // Use fallback search with 3-day lookback for initial pass (holidays/weekends)
               let entryPrice = null;
               let formattedEntryPrice = null;
 
               if (!skipPrice && rec.post_date) {
-                const price = await priceService.searchPrice(
+                const price = await priceService.searchPriceWithFallback(
                   ticker,
                   postDateObj,
-                  assetType
+                  assetType,
+                  3 // maxLookbackDays for initial fetch
                 );
-                if (price !== null) {
+                if (price !== null && this.isValidEntryPrice(price, assetType, asset)) {
                   entryPrice = String(price);
-                  const symbol = priceService.getCurrencySymbol(currency);
-                  // If symbol is different from ISO code (e.g. $ vs USD), use Prefix ($100).
-                  // Otherwise use Suffix (100 USD).
-                  if (symbol !== currency) {
-                    formattedEntryPrice = `${symbol}${Math.round(price)}`;
-                  } else {
-                    formattedEntryPrice = `${Math.round(price)} ${currency}`;
-                  }
+                  // Use AI-determined currency symbol from classification for proper display formatting
+                  // Indices will have empty currencySymbol, other assets will have €, $, ₺, etc.
+                  formattedEntryPrice = priceService.formatPriceForDisplay(
+                    price,
+                    currencySymbol,
+                    assetType
+                  );
                   pricesFetched++;
                 }
               }
@@ -607,7 +649,18 @@ export class CombinedPredictionsService {
                   p.horizon?.type || "custom"
                 );
 
-              // Create combined row
+              // Validate entry price is available before creating combined prediction
+              if (entryPrice === null || entryPrice === undefined) {
+                this.log("warn", `Skipping prediction without entry price for ${asset}`, {
+                  videoId,
+                  asset,
+                  symbol: p.asset,
+                });
+                skipped++;
+                continue;
+              }
+
+              // Create combined row with AI model extraction tracking
               const combinedRow = {
                 channel_id: rec.channel_id,
                 channel_name: rec.channel_name,
@@ -628,6 +681,7 @@ export class CombinedPredictionsService {
                 prediction_text: predictionText,
                 status: "pending",
                 platform: "YouTube",
+                ai_model_extraction: rec.ai_model || null, // Track which AI model extracted this
               };
 
               if (!dryRun) {
@@ -706,12 +760,13 @@ export class CombinedPredictionsService {
   }
 
   /**
-   * Infer asset type from asset name
+   * Infer asset type from asset name (DEPRECATED - use assetClassifierService instead)
+   * Kept for backward compatibility and fallback purposes only
    */
   private inferAssetType(asset: string): string {
-    const upper = asset.toUpperCase().trim();
+    const upper = asset.toUpperCase().trim().replace(/\s+/g, "");
 
-    // Crypto
+    // Quick fallback mapping for critical assets
     if (
       [
         "BTC",
@@ -732,21 +787,19 @@ export class CombinedPredictionsService {
     )
       return "crypto";
 
-    // Commodities
     if (
       [
         "GOLD",
         "SILVER",
         "CRUDE",
         "OIL",
-        "NATURAL GAS",
+        "NATURALGAS",
         "BRENT",
         "WTI",
       ].includes(upper)
     )
       return "commodity";
 
-    // Forex
     if (
       ["EURUSD", "USDJPY", "GBPUSD", "USDTRY", "EURTRY", "XAUUSD"].includes(
         upper
@@ -754,7 +807,6 @@ export class CombinedPredictionsService {
     )
       return "fx";
 
-    // Indices
     if (
       [
         "SP500",
@@ -765,6 +817,7 @@ export class CombinedPredictionsService {
         "NIKKEI",
         "BIST100",
         "BIST30",
+        "BIST75",
       ].includes(upper)
     )
       return "index";
@@ -797,7 +850,7 @@ export class CombinedPredictionsService {
       // Fetch predictions with null asset_entry_price
       const { data: rows, error } = await supabaseService.supabase
         .from("combined_predictions")
-        .select("id, asset, asset_type, post_date")
+        .select("id, asset, asset_type, post_date, retry_count, last_retry_at")
         .is("asset_entry_price", null)
         .limit(limit);
 
@@ -821,17 +874,31 @@ export class CombinedPredictionsService {
           const asset = row.asset;
           const postDate = new Date(row.post_date);
 
-          // Infer asset type if missing
+          // Infer asset type if missing (use AI classifier)
           let assetType = row.asset_type;
           if (!assetType) {
-            assetType = this.inferAssetType(asset);
+            try {
+              const classification = await assetClassifierService.classifyAsset(
+                asset,
+                ""
+              );
+              assetType = classification.assetType;
+            } catch (classifyErr) {
+              // Fallback to basic inference if AI fails
+              this.log("warn", `Asset classification failed for ${asset} in retry, using fallback`, {
+                error: this.safeErrorMessage(classifyErr),
+              });
+              assetType = this.inferAssetType(asset);
+            }
           }
 
-          // Fetch price
-          const price = await priceService.searchPrice(
+          // Fetch price with fallback to previous dates (handles holidays/weekends)
+          // 5-day lookback for retry (more thorough than initial 3-day pass)
+          const price = await priceService.searchPriceWithFallback(
             asset,
             postDate,
-            assetType
+            assetType,
+            5 // maxLookbackDays
           );
 
           if (price !== null && !dryRun) {
@@ -841,6 +908,8 @@ export class CombinedPredictionsService {
               .update({
                 asset_entry_price: String(price),
                 asset_type: assetType, // Also update asset_type if it was inferred
+                retry_count: (row.retry_count || 0) + 1,
+                last_retry_at: new Date().toISOString(),
               })
               .eq("id", row.id);
 
@@ -851,7 +920,7 @@ export class CombinedPredictionsService {
               });
               failed++;
             } else {
-              this.log("info", `Updated entry price for ${asset}`, {
+              this.log("info", `Updated entry price for ${asset} via fallback search`, {
                 id: row.id,
                 price,
               });
@@ -860,9 +929,26 @@ export class CombinedPredictionsService {
           } else if (price === null) {
             this.log(
               "warn",
-              `Could not fetch price for ${asset} on ${postDate.toISOString()}`,
+              `Could not fetch price for ${asset} within 5-day lookback from ${postDate.toISOString()}`,
               { id: row.id }
             );
+            // Still update retry_count even on failure for tracking
+            if (!dryRun) {
+              const { error: retryMetaError } = await supabaseService.supabase
+                .from("combined_predictions")
+                .update({
+                  retry_count: (row.retry_count || 0) + 1,
+                  last_retry_at: new Date().toISOString(),
+                })
+                .eq("id", row.id);
+              
+              if (retryMetaError) {
+                this.log("warn", "Failed to update retry metadata", { 
+                  id: row.id, 
+                  error: this.safeErrorMessage(retryMetaError) 
+                });
+              }
+            }
             failed++;
           } else {
             // Dry run with price found
@@ -899,6 +985,73 @@ export class CombinedPredictionsService {
       });
       throw err;
     }
+  }
+
+  /**
+   * Validate entry price is within reasonable bounds for the asset type
+   * Detects obviously wrong prices (e.g., SPX showing 35 instead of 6500)
+   */
+  private isValidEntryPrice(price: number | null, assetType: string, asset: string): boolean {
+    if (price === null || price === undefined || price <= 0) {
+      return false;
+    }
+
+    // Define reasonable price bounds per asset type and specific assets
+    // These are conservative ranges to catch obvious parsing errors
+    const bounds: { [key: string]: [number, number] } = {
+      // Indices: reasonable ranges (in index points)
+      'SPX|S&P 500|^GSPC': [5000, 8500],
+      'NDX|NASDAQ|^IXIC': [15000, 35000],
+      'BIST100': [8000, 11000],
+      'DAX': [16000, 20000],
+      'FTSE': [7000, 8500],
+
+      // Crypto: reasonable ranges (in USD)
+      'BTC|BITCOIN': [20000, 200000],
+      'ETH|ETHEREUM': [1000, 20000],
+      'SOL': [100, 500],
+
+      // Commodities: reasonable ranges (in USD per unit)
+      'GOLD|XAU': [1500, 2500],
+      'SILVER|XAG': [25, 50],
+      'OIL|CRUDE': [50, 150],
+
+      // FX pairs: reasonable ranges (in quote currency units)
+      'USD': [0.001, 200],  // Generic USD pair
+      'EUR': [1, 2],
+      'GBP': [1, 2],
+      'JPY': [0.005, 0.02],
+      'TRY': [30, 50],
+    };
+
+    const normalizedAsset = (asset || '').toUpperCase();
+    const normalizedType = (assetType || '').toLowerCase();
+
+    // Find matching bound
+    for (const [key, [min, max]] of Object.entries(bounds)) {
+      const patterns = key.split('|');
+      if (patterns.some(p => normalizedAsset.includes(p) || normalizedAsset.includes(p.toUpperCase()))) {
+        const isInBounds = price >= min && price <= max;
+        if (!isInBounds) {
+          logger.warn(`⚠️ Entry price ${price} for ${asset} (${assetType}) outside expected range [${min}, ${max}]. May indicate parsing error.`);
+        }
+        return isInBounds;
+      }
+    }
+
+    // If no specific bounds found, do basic sanity check
+    // Crypto and small-value assets should be < 1000000
+    // Large indices should be > 100
+    if (normalizedType === 'crypto' && price > 1000000) {
+      logger.warn(`⚠️ Crypto price ${price} seems unusually high for asset ${asset}`);
+      return false;
+    }
+    if ((normalizedType === 'index' || normalizedType === 'forex') && price < 10) {
+      logger.warn(`⚠️ Index/Forex price ${price} seems too low for asset ${asset}`);
+      return false;
+    }
+
+    return true;
   }
 }
 

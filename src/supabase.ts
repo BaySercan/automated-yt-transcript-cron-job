@@ -417,21 +417,18 @@ export class SupabaseService {
       return "pending";
     }
 
-    // AI analysis completed - check if we have meaningful results
+    // CRITICAL FIX: Check if we have predictions FIRST
+    // Empty predictions = RETRY ELIGIBLE (mark as pending)
+    // This is the key to enabling the retry system
     const hasValidPredictions = predictions && predictions.length > 0;
-    const hasValidSummary =
-      transcriptSummary &&
-      !transcriptSummary.toLowerCase().includes("failed") &&
-      !transcriptSummary.toLowerCase().includes("error") &&
-      !transcriptSummary.toLowerCase().includes("no analysis");
-
-    // If we have either predictions OR a valid summary, mark as analyzed
-    if (hasValidPredictions || hasValidSummary) {
-      return "analyzed";
+    if (!hasValidPredictions) {
+      // No predictions extracted = needs retry
+      return "pending";
     }
 
-    // AI completed but no meaningful results
-    return "pending";
+    // Only mark as analyzed if we have actual predictions
+    // Valid summary alone is not enough - we need financial data
+    return "analyzed";
   }
 
   // ==================== LEGACY METHODS (DEPRECATED) ====================

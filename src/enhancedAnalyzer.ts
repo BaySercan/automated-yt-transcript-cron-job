@@ -664,9 +664,8 @@ ${transcript}
     const languageName =
       languageNames[analysisLanguage] || analysisLanguage.toUpperCase();
 
-    return (
-      basePrompt +
-      `
+    // Build language-specific enhancements
+    let languageSpecificEnhancements = `
 
 **MULTILINGUAL ANALYSIS ENHANCEMENT:**
 - PRIMARY LANGUAGE: ${analysisLanguage} (${languageName})
@@ -674,8 +673,41 @@ ${transcript}
 - Focus on ${languageName} financial terminology and expressions
 - Extract predictions using ${languageName} financial language patterns
 - Ensure transcript summary is in ${languageName}
-- Adapt analysis approach to ${languageName} linguistic patterns`
-    );
+- Adapt analysis approach to ${languageName} linguistic patterns`;
+
+    // SPECIAL HANDLING FOR TURKISH FINFLUENCERS
+    if (analysisLanguage === "tr") {
+      languageSpecificEnhancements += `
+
+**⚠️ SPECIAL RULE FOR TURKISH FINFLUENCERS (CRITICAL):**
+
+Turkish speakers often discuss two different gold products:
+1. **XAUUSD** (Ounce Gold / USD) - International commodity market (1 ounce = ~31.1 grams)
+   - This is the standard GOLD traded globally
+   - Price: ~$2000-2100 per ounce
+   - Use this if context suggests international/global market
+
+2. **XAUTRYG** (Gram Gold / Turkish Lira) - Local Turkish gold market
+   - Denominated in Turkish Lira (TRY) per gram
+   - Price: ~100-300 TRY per gram
+   - Use this ONLY if:
+     a) Turkish speaker explicitly mentions "gram" OR "gr" OR "g" with price
+     b) Price is in Turkish Lira (TRY) range context
+     c) Context suggests local Turkish precious metals market
+
+**DECISION RULE:**
+- If Turkish speaker says "altın" (gold) WITHOUT gram context → Assume XAUUSD (international)
+- If Turkish speaker says "gram altın" OR prices are in 100-300 TRY range → Use XAUTRYG
+- If UNCERTAIN → Default to XAUUSD (safer for international coverage)
+
+**EXAMPLE MAPPING:**
+- "Altın 2100 dolar" → XAUUSD (gold at 2100 dollars)
+- "Gram altın 250 lira" → XAUTRYG (gram gold at 250 lira)
+- "Altın çıkabilir 2200'e" → XAUUSD (gold might go to 2200 [dollars])
+- "Altın gramı 280 TL'ye çıkacak" → XAUTRYG (gram gold will reach 280 TL)`;
+    }
+
+    return basePrompt + languageSpecificEnhancements;
   }
 
   /**
@@ -956,8 +988,16 @@ ${transcript}
 
   private validateTargetPrice(price: any): number | null {
     if (price === null || price === undefined) return null;
+    
+    // Try locale-aware parsing first (handles European and English formats)
+    const localeNum = this.parseLocaleNumber(String(price));
+    if (localeNum !== null) {
+      return localeNum;
+    }
+    
+    // Fallback to direct Number parsing
     const num = Number(price);
-    return !isNaN(num) && num > 0 ? num : null;
+    return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
   }
 
   private validateConfidence(confidence: any): "low" | "medium" | "high" {
@@ -987,10 +1027,145 @@ ${transcript}
   }
 
   /**
+   * Parse numbers from different locales (European vs English format)
+   * Handles ambiguous cases intelligently
+   * Examples:
+   *   "1.234" → European (1234) or English (1.234)? → assume European if no decimals
+   *   "1,234" → English (1234) or European decimal? → assume English if followed by 2 digits
+   *   "6,570" → European (6.57) or English (6570)? → assume European (standard in Turkish/DE/FR)
+   *   "13.500" → European (13500) or English (13.5)? → assume European (common currency format)
+   */
+  private parseLocaleNumber(value: string, transcriptLanguage?: string): number | null {
+    if (!value || typeof value !== 'string') return null;
+    
+    const cleaned = value.trim();
+    if (cleaned.length === 0) return null;
+
+    // Try direct parse first
+    const directNum = Number(cleaned);
+    if (!isNaN(directNum) && isFinite(directNum) && directNum > 0) {
+      return directNum;
+    }
+
+    // Detect format: does it have separators?
+    const hasDot = cleaned.includes('.');
+    const hasComma = cleaned.includes(',');
+
+    // No separators - just return as-is
+    if (!hasDot && !hasComma) {
+      const num = Number(cleaned);
+      return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+    }
+
+    // Both separators present: "1.234,56" or "1,234.56"
+    if (hasDot && hasComma) {
+      const dotIndex = cleaned.lastIndexOf('.');
+      const commaIndex = cleaned.lastIndexOf(',');
+      
+      if (commaIndex > dotIndex) {
+        // European format: "1.234,56" → remove dot, replace comma with dot
+        const normalized = cleaned.replace(/\./g, '').replace(',', '.');
+        const num = Number(normalized);
+        return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+      } else {
+        // English format: "1,234.56" → remove comma
+        const normalized = cleaned.replace(/,/g, '');
+        const num = Number(normalized);
+        return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+      }
+    }
+
+    // Only dots: could be European thousands ("1.234") or English decimal ("1.234")
+    if (hasDot && !hasComma) {
+      const parts = cleaned.split('.');
+      if (parts.length === 2) {
+        // Single dot: ambiguous
+        const afterDot = parts[1];
+        
+        // If >= 3 digits after dot: likely decimal (European scientific notation)
+        if (afterDot.length >= 3) {
+          const num = Number(cleaned); // keep as-is
+          return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+        }
+        
+        // If 1-2 digits after dot AND > 2: likely English decimal
+        if (afterDot.length <= 2 && !isNaN(Number(afterDot))) {
+          const num = Number(cleaned);
+          return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+        }
+        
+        // Otherwise: European thousands separator, remove it
+        const normalized = cleaned.replace(/\./g, '');
+        const num = Number(normalized);
+        return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+      } else if (parts.length > 2) {
+        // Multiple dots: European thousands ("1.000.000"), remove all
+        const normalized = cleaned.replace(/\./g, '');
+        const num = Number(normalized);
+        return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+      }
+    }
+
+    // Only commas: likely European decimal or English thousands
+    if (hasComma && !hasDot) {
+      const parts = cleaned.split(',');
+      if (parts.length === 2) {
+        const afterComma = parts[1];
+        
+        // If 1-2 digits after comma: European decimal ("6,57")
+        if (afterComma.length <= 2) {
+          const normalized = cleaned.replace(',', '.');
+          const num = Number(normalized);
+          return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+        }
+        
+        // If > 2 digits: English thousands ("1,000,000" style - multiple commas expected but only one present)
+        const normalized = cleaned.replace(/,/g, '');
+        const num = Number(normalized);
+        return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+      } else if (parts.length > 2) {
+        // Multiple commas: English thousands separator, remove all
+        const normalized = cleaned.replace(/,/g, '');
+        const num = Number(normalized);
+        return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Get the current model being used (for tracking purposes)
+   * Ensures model name is captured from config or env vars, throws if not configured
    */
   getModelName(): string {
-    return config.openrouterModel || config.openrouterModel2 || "unknown";
+    // Check config first (primary preference)
+    if (config.openrouterModel && config.openrouterModel.trim()) {
+      return config.openrouterModel.trim();
+    }
+    
+    // Check config fallback model
+    if (config.openrouterModel2 && config.openrouterModel2.trim()) {
+      return config.openrouterModel2.trim();
+    }
+    
+    // Fallback to environment variables directly
+    const envModel = process.env.OPENROUTER_MODEL || process.env.OPENROUTER_MODEL_2;
+    if (envModel && envModel.trim()) {
+      logger.warn('Using model from env var (config not available)', { model: envModel });
+      return envModel.trim();
+    }
+    
+    // CRITICAL: If truly no model configured, fail loudly
+    const errorMsg = '⚠️ CRITICAL: No AI model configured! Must set OPENROUTER_MODEL or OPENROUTER_MODEL_2 in .env';
+    logger.error(errorMsg, {
+      configModel: config.openrouterModel,
+      configModel2: config.openrouterModel2,
+      envModel: process.env.OPENROUTER_MODEL,
+      envModel2: process.env.OPENROUTER_MODEL_2,
+    });
+    
+    throw new Error(errorMsg);  // Fail fast instead of returning placeholder
   }
 
   /**

@@ -17,6 +17,7 @@ export interface RetryRecord {
   id: string;
   video_id: string;
   channel_id: string;
+  channel_name?: string;
   video_title: string;
   retry_count: number;
   last_retry_at: string | null;
@@ -97,7 +98,7 @@ export class RetryService {
     }
   }
 
-  // Get records that need retry (newer first, with empty predictions, excluding out-of-subject)
+  // Get records that need retry (newer first, with subject_outcome='pending')
   private async getRecordsNeedingRetry(): Promise<RetryRecord[]> {
     try {
       let query = supabaseService.getClient()
@@ -115,10 +116,10 @@ export class RetryService {
           raw_transcript,
           transcript_summary
         `)
-        .eq('predictions', '[]')
-        .or(`retry_count.is.null,retry_count.lt.${this.MAX_RETRY_ATTEMPTS}`)
-        // KEY: Exclude videos marked as out_of_subject
-        .neq('subject_outcome', 'out_of_subject');
+        // FIXED: Use subject_outcome='pending' instead of predictions='[]' to avoid JSONB string comparison bug
+        .eq('subject_outcome', 'pending')
+        // Select records with retry_count < MAX (0, 1, 2 are eligible for retry)
+        .lt('retry_count', this.MAX_RETRY_ATTEMPTS);
 
       // OPTIMIZATION: Only retry videos from currently active channels
       // This prevents wasting resources on channels we no longer track
@@ -135,7 +136,6 @@ export class RetryService {
 
       const { data, error } = await query
         .order('post_date', { ascending: false }) // Newer first
-        .limit(15); // Reduced from 30 to 15 for better control
 
       if (error) {
         throw new Error(`Failed to fetch retry candidates: ${error.message}`);
@@ -267,12 +267,13 @@ export class RetryService {
 
   // OPTIMIZED: Process a single record for retry using saved transcript first
   private async processSingleRecord(record: RetryRecord): Promise<RetryResult> {
-    const retryNumber = record.retry_count + 1;
+    const retryNumber = record.retry_count; // Current retry count (0, 1, 2)
+    const nextRetryCount = retryNumber + 1;  // Next value to store (1, 2, 3)
     const startTime = Date.now();
     let transcriptSource: 'saved' | 'api' | 'none' = 'none';
     
     try {
-      logger.info(`🔄 Retrying record ${record.video_id} (attempt ${retryNumber}/${this.MAX_RETRY_ATTEMPTS})`);
+      logger.info(`🔄 Retrying record ${record.video_id} (attempt ${retryNumber + 1}/${this.MAX_RETRY_ATTEMPTS})`);
 
       // OPTIMIZATION: Check if we have a saved transcript first
       let transcriptText: string | null = null;
@@ -348,46 +349,87 @@ export class RetryService {
       const hasValidPredictions = analysis.predictions && analysis.predictions.length > 0;
 
       if (!hasValidPredictions) {
-        // This is key: Don't mark as out of subject just because no predictions were extracted
-        // Instead, update the record but mark it as analyzed so it won't be retried
-        logger.info(`📋 Financial content detected but no specific predictions for video ${record.video_id}, marking as out_of_subject`);
-        await supabaseService.updatePredictionWithRetry(record.id, {
-          transcript_summary: analysis.transcript_summary,
-          predictions: [], // Keep empty
-          ai_modifications: analysis.ai_modifications,
-          language: analysis.language,
-          raw_transcript: transcriptText, // Update/save the transcript we used
-          subject_outcome: 'out_of_subject'
-        });
+        // No predictions found on this retry attempt
+        // Keep record in 'pending' state but increment retry_count
+        // Will auto-escalate to 'out_of_subject' when retry_count reaches MAX_RETRY_ATTEMPTS
+        logger.info(`📋 Financial content detected but no specific predictions for video ${record.video_id} (attempt ${retryNumber + 1}/${this.MAX_RETRY_ATTEMPTS})`);
+        
+        // Determine if this is the final retry attempt
+        const isFinalAttempt = nextRetryCount >= this.MAX_RETRY_ATTEMPTS;
+        
+        if (isFinalAttempt) {
+          // Final attempt failed - escalate to out_of_subject
+          logger.warn(`⚠️ Max retries reached for ${record.video_id}, marking as out_of_subject`);
+          await supabaseService.recordVideoAnalysis({
+            videoId: record.video_id,
+            channelId: record.channel_id,
+            channelName: record.channel_name,
+            videoTitle: record.video_title,
+            postDate: record.post_date,
+            transcriptSummary: analysis.transcript_summary,
+            predictions: [],
+            aiModifications: analysis.ai_modifications,
+            language: analysis.language,
+            rawTranscript: transcriptText,
+            hasTranscript: !!transcriptText,
+            aiAnalysisSuccess: true,
+            hasFinancialContent: false,
+            aiModel: globalAIAnalyzer.getModelName(),
+            context: {
+              isRetry: true,
+              retryAttemptNumber: nextRetryCount,
+              previousRecordId: record.id,
+              errorMessage: `Max retries reached: ${nextRetryCount}/${this.MAX_RETRY_ATTEMPTS}`,
+            },
+          });
+        } else {
+          // Not final attempt yet - keep pending, will retry next time
+          await this.updateRetryStatus(record.id, nextRetryCount, `No predictions found on attempt ${retryNumber + 1}, will retry`);
+        }
         
         return {
-          success: true, // Mark as successful to stop retrying
+          success: true, // Count as success to process next record
           transcriptFound: true,
           transcriptSource,
           predictionsFound: 0
         };
       }
 
-      // Update the existing record with new results
-      await supabaseService.updatePredictionWithRetry(record.id, {
-        transcript_summary: analysis.transcript_summary,
-        predictions: analysis.predictions,
-        ai_modifications: analysis.ai_modifications,
-        language: analysis.language,
-        raw_transcript: transcriptText, // Update/save the transcript we used
-        subject_outcome: 'analyzed'
-      });
-
-      logger.info(`✅ Successfully updated predictions for video ${record.video_id}`, {
+      // Success: Found predictions! Update record and mark as analyzed
+      logger.info(`✅ Successfully extracted predictions for video ${record.video_id}`, {
         predictionsFound: analysis.predictions.length,
         modifications: analysis.ai_modifications.length,
         language: analysis.language,
-        transcriptSource, // Log which source we used
+        transcriptSource,
         processingTime: Date.now() - startTime
       });
 
-      // Mark as successful
-      await this.markRetrySuccess(record.id);
+      // Update the existing record with new results and mark as analyzed
+      await supabaseService.recordVideoAnalysis({
+        videoId: record.video_id,
+        channelId: record.channel_id,
+        channelName: record.channel_name,
+        videoTitle: record.video_title,
+        postDate: record.post_date,
+        transcriptSummary: analysis.transcript_summary,
+        predictions: analysis.predictions,
+        aiModifications: analysis.ai_modifications,
+        language: analysis.language,
+        rawTranscript: transcriptText,
+        hasTranscript: !!transcriptText,
+        aiAnalysisSuccess: true,
+        hasFinancialContent: true,
+        aiModel: globalAIAnalyzer.getModelName(),
+        context: {
+          isRetry: true,
+          retryAttemptNumber: nextRetryCount,
+          previousRecordId: record.id,
+          errorMessage: `Retry successful: Extracted ${analysis.predictions.length} predictions`,
+        },
+      });
+
+      // Mark retry as successful
+      await this.markRetrySuccess(record.id, analysis.predictions.length, transcriptSource);
 
       // Record successful metrics
       RateLimitMonitor.recordRequest('retry-record', true, Date.now() - startTime);
@@ -503,7 +545,7 @@ export class RetryService {
       await supabaseService.getClient()
         .from('finfluencer_predictions')
         .update({
-          retry_count: retryCount,
+          retry_count: retryCount,  // Incremented: 0 → 1, 1 → 2, 2 → 3
           last_retry_at: new Date().toISOString(),
           retry_reason: reason,
           updated_at: new Date().toISOString() // Always update timestamp
@@ -514,15 +556,16 @@ export class RetryService {
     }
   }
 
-  // Mark a record as successfully retried
-  private async markRetrySuccess(recordId: string): Promise<void> {
+  // Mark a record as successfully retried with proper tracking
+  private async markRetrySuccess(recordId: string, predictionsExtracted: number = 0, transcriptSource: string = 'unknown'): Promise<void> {
     try {
       await supabaseService.getClient()
         .from('finfluencer_predictions')
         .update({
           retry_count: this.MAX_RETRY_ATTEMPTS, // Set to max to prevent further retries
           last_retry_at: new Date().toISOString(),
-          retry_reason: null, // Clear any previous error
+          retry_reason: `Retry successful: Extracted ${predictionsExtracted} predictions from ${transcriptSource}`,
+          subject_outcome: 'analyzed', // Mark as analyzed (complete)
           updated_at: new Date().toISOString()
         })
         .eq('id', recordId);
@@ -542,8 +585,8 @@ export class RetryService {
       const { data, error } = await supabaseService.getClient()
         .from('finfluencer_predictions')
         .select('retry_count, last_retry_at, subject_outcome, raw_transcript')
-        .eq('predictions', '[]')
-        .neq('subject_outcome', 'out_of_subject'); // Exclude out-of-subject videos
+        .eq('subject_outcome', 'pending') // Find records with pending status
+        .lt('retry_count', this.MAX_RETRY_ATTEMPTS); // Only those not yet maxed out
 
       if (error) {
         throw error;

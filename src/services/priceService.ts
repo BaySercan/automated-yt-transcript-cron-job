@@ -16,6 +16,7 @@ export class PriceService {
     // Indices
     sp500: "^GSPC",
     "s&p500": "^GSPC",
+    spx: "^GSPC",
     nasdaq: "^IXIC",
     dow: "^DJI",
     dax: "^GDAXI",
@@ -37,6 +38,9 @@ export class PriceService {
     xpd: "PA=F",
     xauusd: "GC=F",
     xagusd: "SI=F",
+    spy: "SPY",
+    xautryg: "GAUTRYG",
+    gautryg: "GAUTRYG",
 
     // Forex
     eurusd: "EURUSD=X",
@@ -80,69 +84,47 @@ export class PriceService {
 
   /**
    * Detect currency based on symbol and asset type
-   * Returns ISO currency code (USD, TRY, EUR, GBP, JPY, INR, etc.)
+   * NOTE: Prefer assetClassifierService.classifyAsset() for new code
+   * This method is kept for backward compatibility and internal price storage
    */
   detectCurrency(symbol: string, assetType: string = "stock"): string {
     const sym = symbol.toUpperCase();
     const type = assetType.toLowerCase();
 
-    // Crypto is always priced in USD
+    // Crypto is always USD
     if (type === "crypto") {
       return "USD";
     }
 
-    // Forex pairs - extract base currency
+    // Forex base currency extraction
     if (type === "forex" || sym.includes("=X")) {
-      // Format: EURUSD=X, USDJPY=X, GBPUSD=X
       const cleanSym = sym.replace("=X", "");
       if (cleanSym.length >= 6) {
-        // First 3 characters are base currency
+        // First 3 characters = base currency
         return cleanSym.substring(0, 3);
       }
     }
 
-    // Exchange-based detection
-    // Turkish Stock Exchange (.IS)
-    if (sym.endsWith(".IS")) {
-      return "TRY";
+    // Exchange suffix detection
+    if (sym.endsWith(".IS")) return "TRY"; // Turkish
+    if (sym.endsWith(".NS") || sym.endsWith(".BO")) return "INR"; // Indian
+    if (sym.endsWith(".L")) return "GBP"; // London
+    if (sym.endsWith(".T")) return "JPY"; // Tokyo
+
+    // Index-specific detection
+    if (type === "index") {
+      if (sym === "DAX" || sym === "^GDAXI") return "EUR";
+      if (sym === "FTSE" || sym === "^FTSE") return "GBP";
+      if (sym === "NIKKEI" || sym === "^N225") return "JPY";
     }
 
-    // Indian Stock Exchange (.NS = NSE, .BO = BSE)
-    if (sym.endsWith(".NS") || sym.endsWith(".BO")) {
-      return "INR";
-    }
-
-    // London Stock Exchange (.L)
-    if (sym.endsWith(".L")) {
-      return "GBP";
-    }
-
-    // Tokyo Stock Exchange (.T)
-    if (sym.endsWith(".T")) {
-      return "JPY";
-    }
-
-    // European indices
-    if (sym === "^GDAXI" || sym === "^STOXX50E") {
-      return "EUR";
-    }
-
-    // UK indices
-    if (sym === "^FTSE") {
-      return "GBP";
-    }
-
-    // Japanese indices
-    if (sym === "^N225") {
-      return "JPY";
-    }
-
-    // Default to USD for US assets and others
+    // Default to USD
     return "USD";
   }
 
   /**
    * Get display symbol for a currency ISO code
+   * @deprecated Use assetClassifierService.classifyAsset() for new code
    */
   getCurrencySymbol(isoCode: string): string {
     const symbols: { [key: string]: string } = {
@@ -161,30 +143,114 @@ export class PriceService {
   }
 
   /**
-   * Normalize asset name to a canonical format (e.g. XAU -> GOLD, BTC/USD -> BTC)
+   * Format number in European locale style (1.234,56)
+   * Uses . for thousand separator and , for decimal separator
+   * @param num Number to format
+   * @param decimals Number of decimal places (default 2)
+   * @returns Formatted number string
+   */
+  formatNumberEuropean(num: number, decimals: number = 2): string {
+    // Use German locale for proper European formatting
+    return num.toLocaleString("de-DE", {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+      useGrouping: true,
+    });
+  }
+
+  /**
+   * Determine appropriate decimal places based on asset type and price magnitude
+   * Crypto: Up to 8 decimals for precision (small values like 0.000045)
+   * Forex: 4-5 decimals for currency pairs
+   * Commodities: 2 decimals
+   * Stocks/Indices: 2 decimals
+   * @param assetType The type of asset
+   * @param price The price value (used to determine if more decimals are needed)
+   * @returns Number of decimal places to display
+   */
+  private getDynamicDecimalPlaces(assetType: string, price: number): number {
+    const type = assetType.toLowerCase();
+
+    if (type === "crypto") {
+      // For crypto: if price is very small (< 1), use more decimals for precision
+      // Otherwise cap at 8 for extreme cases
+      if (price < 0.01) return 8;
+      if (price < 0.1) return 6;
+      if (price < 1) return 4;
+      return 2; // Standard 2 decimals for higher-priced crypto
+    }
+
+    if (type === "forex") {
+      return 4; // Standard forex precision
+    }
+
+    // Commodities, Stocks, Indices
+    return 2;
+  }
+
+  /**
+   * Format price for display with locale-aware formatting and currency symbol
+   * Indices show number only (no symbol), other assets show symbol + number
+   * Crypto and small-value assets get dynamic decimal places for precision
+   * @param price The raw price value
+   * @param currencySymbol Display symbol from classification (€, $, ₺, etc.)
+   * @param assetType Asset type to determine formatting
+   * @returns Formatted price string ready for display
+   */
+  formatPriceForDisplay(
+    price: number,
+    currencySymbol: string,
+    assetType: string
+  ): string {
+    if (price === null || price === undefined || isNaN(price)) {
+      return "N/A";
+    }
+
+    // Determine appropriate decimal places for this asset type
+    const decimals = this.getDynamicDecimalPlaces(assetType, price);
+
+    // Format the number in European style (1.234,56 or 0,000045 for crypto)
+    const formattedNum = this.formatNumberEuropean(price, decimals);
+
+    // For indices: show number only (no currency symbol)
+    if (assetType.toLowerCase() === "index") {
+      return formattedNum;
+    }
+
+    // For other assets: combine symbol + formatted number
+    // If currencySymbol is empty or invalid, fall back to showing just the number
+    if (!currencySymbol || currencySymbol.trim().length === 0) {
+      return formattedNum;
+    }
+
+    return `${currencySymbol}${formattedNum}`;
+  }
+
+  /**
+   * Normalize asset name to space-less format
+   * NOTE: AI classifier now handles most normalization
+   * This method provides basic cleanup for database storage consistency
    */
   normalizeAssetName(asset: string): string {
     if (!asset) return "UNKNOWN";
 
     let normalized = asset.toUpperCase().trim();
 
-    // 1. Remove common suffixes
-    normalized = normalized.replace(/\/USD$/, "").replace(/-USD$/, "");
+    // Remove common separators for consistency
+    normalized = normalized
+      .replace(/\//g, "") // Remove slashes: USD/TRY -> USDTRY
+      .replace(/\s+/g, ""); // Remove spaces: BIST 100 -> BIST100
 
-    // 2. Canonical Mappings
+    // Keep only essential mappings for backward compatibility
     const mappings: { [key: string]: string } = {
       XAU: "GOLD",
       XAUUSD: "GOLD",
-      "GOLD SPOT": "GOLD",
+      GOLDSPOT: "GOLD",
       XAG: "SILVER",
       XAGUSD: "SILVER",
-      "SILVER SPOT": "SILVER",
-      XPT: "PLATINUM",
-      XPD: "PALLADIUM",
+      SILVERSPOT: "SILVER",
       BITCOIN: "BTC",
       ETHEREUM: "ETH",
-      BIST100: "BIST 100",
-      XU100: "BIST 100",
     };
 
     return mappings[normalized] || normalized;
@@ -454,13 +520,16 @@ export class PriceService {
       }
 
       // 3. Gold/Silver LIVE prices via USAGOLD (current only, historical needs browser)
+      // Supports GOLD, XAU, XAUUSD (USD/Ounce) and XAUTRYG (TRY/Gram - local Turkish market)
       if (isToday) {
+        // XAUUSD = Ounce Gold / USD (international commodity market, ~31.1 grams per ounce)
         if (
           assetUpper === "GOLD" ||
           assetUpper === "XAU" ||
+          assetUpper === "XAUUSD" ||
           assetUpper === "GC=F"
         ) {
-          logger.info(`Fetching live gold price from USAGOLD...`);
+          logger.info(`Fetching live gold price (USD/Ounce) from USAGOLD...`);
           const goldPrice = await usagoldService.getLiveGoldPrice();
           if (goldPrice !== null) {
             reportingService.incrementPriceApiCall("usagold");
@@ -474,6 +543,23 @@ export class PriceService {
             );
             return goldPrice;
           }
+        }
+
+        // XAUTRYG = Gram Gold / Turkish Lira (local Turkish precious metals market)
+        // Note: This is a local Turkish market price, not directly available via USAGOLD
+        // Would need to call a Turkish precious metals provider or forex conversion
+        // For now, this will fallback to Yahoo Finance which may have XAUTRY or similar
+        if (assetUpper === "XAUTRYG") {
+          logger.info(
+            `Fetching gram gold price (TRY) for Turkish market (XAUTRYG)...`
+          );
+          // Try GAUTRYG first (gram gold in Turkish lira via Yahoo Finance/Stooq)
+          logger.debug(`Attempting XAUTRYG fallback to GAUTRYG...`);
+          // XAUTRYG is a local Turkish market instrument
+          // Fallback strategy: 
+          // 1. Try GAUTRYG (gram gold TRY) via Yahoo Finance
+          // 2. Try GOLD/XAUUSD and convert to TRY if needed
+          // Will be handled by Yahoo Finance/Stooq fallback below
         }
 
         if (
@@ -614,6 +700,54 @@ export class PriceService {
       reportingService.incrementPriceFailed();
       return null;
     }
+  }
+
+  /**
+   * Search for price with fallback to previous dates (for holidays/weekends)
+   * Tries exact date first, then falls back to previous dates up to maxLookbackDays
+   * Useful for entry price fetching when market was closed on the original date
+   */
+  async searchPriceWithFallback(
+    asset: string,
+    date: Date,
+    assetType?: string,
+    maxLookbackDays: number = 5
+  ): Promise<number | null> {
+    // Try exact date first
+    const exactPrice = await this.searchPrice(asset, date, assetType);
+    if (exactPrice !== null) {
+      logger.info(
+        `Found price for ${asset} on exact date ${date.toISOString().split("T")[0]}: ${exactPrice}`
+      );
+      return exactPrice;
+    }
+
+    // If exact date failed, try previous dates
+    logger.info(
+      `Exact date price not found for ${asset}, trying fallback dates (max ${maxLookbackDays} days back)...`
+    );
+
+    for (let i = 1; i <= maxLookbackDays; i++) {
+      const fallbackDate = new Date(date);
+      fallbackDate.setDate(fallbackDate.getDate() - i);
+
+      const fallbackPrice = await this.searchPrice(
+        asset,
+        fallbackDate,
+        assetType
+      );
+      if (fallbackPrice !== null) {
+        logger.info(
+          `Found price for ${asset} on fallback date ${fallbackDate.toISOString().split("T")[0]} (${i} day(s) back): ${fallbackPrice}`
+        );
+        return fallbackPrice;
+      }
+    }
+
+    logger.warn(
+      `No price found for ${asset} within ${maxLookbackDays} days lookback`
+    );
+    return null;
   }
 
   // Helper method to set cache from other internal methods if needed
@@ -1021,9 +1155,9 @@ export class PriceService {
         return { start, end };
       }
 
-      // Default relative quarter
+      // Default relative quarter (3 months from post date)
       end.setMonth(end.getMonth() + 3);
-      start.setMonth(start.getMonth() + 2);
+      start.setTime(postDate.getTime()); // FIX: Start from postDate, not +2 months
       return { start, end };
     }
 
@@ -1090,7 +1224,7 @@ export class PriceService {
       const number = numberMatch ? parseInt(numberMatch[1], 10) : 1;
 
       end.setMonth(end.getMonth() + number);
-      start.setTime(end.getTime());
+      start.setTime(postDate.getTime()); // FIX: Use postDate, not end, to preserve verification window
       return { start, end };
     }
 
@@ -1205,7 +1339,12 @@ export class PriceService {
     if (now > horizonEnd) {
       // Final check on the last day price to determine "wrong" value
       const finalPrice = await this.searchPrice(asset, checkEnd, assetType);
-      return { status: "wrong", actualPrice: finalPrice || 0 };
+      // Only return actualPrice if it's a valid non-zero value
+      // Returning undefined instead of 0 prevents storing meaningless "0.0000000" in DB
+      return {
+        status: "wrong",
+        actualPrice: finalPrice && finalPrice > 0 ? finalPrice : undefined,
+      };
     }
 
     return { status: "pending" };
