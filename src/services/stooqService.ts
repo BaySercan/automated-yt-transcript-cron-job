@@ -40,7 +40,7 @@ export class StooqService {
       return symbol.replace('=F', '').toLowerCase() + '.f';
     }
 
-    // BIST 100 (Turkey)
+    // BIST100 (Turkey)
     if (symbol.toUpperCase() === 'XU100.IS' || symbol.toUpperCase() === 'BIST100') {
       return '^xutry';
     }

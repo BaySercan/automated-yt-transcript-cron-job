@@ -398,6 +398,149 @@ export class PriceService {
   }
 
   /**
+   * Get exchange rate between two currencies for a specific date
+   * First checks asset_prices table, then queries Yahoo Finance API if not found
+   * Stores new rates in asset_prices table for future use
+   * @param fromCurrency Source currency (e.g., "USD")
+   * @param toCurrency Target currency (e.g., "TRY")
+   * @param date Date to get rate for
+   * @returns Object with rate, source ("cache" or "api"), and date_found
+   */
+  async getExchangeRateForDate(
+    fromCurrency: string,
+    toCurrency: string,
+    date: Date
+  ): Promise<{ rate: number | null; source: "cache" | "api"; date_found: string }> {
+    try {
+      if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) {
+        // No conversion needed if same currency
+        return { rate: 1, source: "cache", date_found: date.toISOString().split("T")[0] };
+      }
+
+      const fromUpper = fromCurrency.toUpperCase();
+      const toUpper = toCurrency.toUpperCase();
+      const formattedDate = date.toISOString().split("T")[0];
+      const pairSymbol = `${fromUpper}${toUpper}`;
+
+      logger.info(
+        `Getting exchange rate for ${fromUpper}/${toUpper} on ${formattedDate}...`
+      );
+
+      // Step 1: Check asset_prices table first (cached rates)
+      try {
+        const { data, error } = await supabaseService.supabase
+          .from("asset_prices")
+          .select("price, date")
+          .eq("asset", pairSymbol)
+          .eq("date", formattedDate)
+          .limit(1)
+          .single();
+
+        if (!error && data) {
+          logger.info(
+            `Found cached exchange rate for ${pairSymbol} on ${formattedDate}: ${data.price}`
+          );
+          return { rate: Number(data.price), source: "cache", date_found: data.date };
+        }
+      } catch (tableErr) {
+        logger.debug(`asset_prices table lookup failed: ${tableErr}`);
+      }
+
+      // Step 2: Try Yahoo Finance API for historical rate
+      // Use special symbols mapping for forex pairs
+      const yahooSymbol = this.SPECIAL_SYMBOLS[pairSymbol.toLowerCase()] || `${fromUpper}${toUpper}=X`;
+
+      logger.info(`Querying Yahoo Finance API for ${yahooSymbol} on ${formattedDate}...`);
+
+      try {
+        const rate = await yahooService.getHistory(yahooSymbol, date);
+
+        if (rate !== null) {
+          logger.info(
+            `Got exchange rate from Yahoo Finance for ${pairSymbol} on ${formattedDate}: ${rate}`
+          );
+
+          // Store in asset_prices table for future use
+          this.saveToAssetPriceTable(pairSymbol, date, rate, "rate", "yahoo_finance");
+
+          return { rate, source: "api", date_found: formattedDate };
+        }
+      } catch (apiErr) {
+        logger.warn(`Yahoo Finance API lookup failed for ${yahooSymbol}: ${apiErr}`);
+      }
+
+      // Step 3: If date is recent, try fetching today's rate and using it as approximation
+      const today = new Date().toISOString().split("T")[0];
+      if (formattedDate !== today) {
+        try {
+          logger.info(
+            `${formattedDate} rate not found, trying to get current ${pairSymbol} rate...`
+          );
+          const currentDate = new Date();
+          const currentRate = await yahooService.getHistory(yahooSymbol, currentDate);
+
+          if (currentRate !== null) {
+            logger.info(
+              `Using current exchange rate as fallback for ${pairSymbol}: ${currentRate}`
+            );
+            return { rate: currentRate, source: "api", date_found: today };
+          }
+        } catch (fallbackErr) {
+          logger.warn(`Current rate fallback also failed: ${fallbackErr}`);
+        }
+      }
+
+      // No rate found
+      logger.warn(
+        `Could not find exchange rate for ${fromUpper}/${toUpper} on ${formattedDate}`
+      );
+      return { rate: null, source: "api", date_found: formattedDate };
+    } catch (error) {
+      logger.error(`Error getting exchange rate: ${error}`);
+      return { rate: null, source: "api", date_found: date.toISOString().split("T")[0] };
+    }
+  }
+
+  /**
+   * Convert a price from one currency to another using historical rates
+   * @param price Price to convert
+   * @param fromCurrency Source currency (e.g., "USD")
+   * @param toCurrency Target currency (e.g., "TRY")
+   * @param date Date for exchange rate lookup
+   * @returns Converted price or null if conversion fails
+   */
+  async convertPriceToCurrency(
+    price: number,
+    fromCurrency: string,
+    toCurrency: string,
+    date: Date
+  ): Promise<number | null> {
+    if (fromCurrency === toCurrency) {
+      return price; // No conversion needed
+    }
+
+    const { rate, source, date_found } = await this.getExchangeRateForDate(
+      fromCurrency,
+      toCurrency,
+      date
+    );
+
+    if (rate === null) {
+      logger.warn(
+        `Conversion failed: no rate found for ${fromCurrency}/${toCurrency}`
+      );
+      return null;
+    }
+
+    const convertedPrice = price * rate;
+    logger.info(
+      `Converted ${price} ${fromCurrency} to ${convertedPrice} ${toCurrency} using rate ${rate} from ${source} (${date_found})`
+    );
+
+    return convertedPrice;
+  }
+
+  /**
    * Search for the price of an asset on a specific date
    * Uses cache first, then CoinMarketCap for current crypto, CoinGecko for historical crypto, and Yahoo Finance for others
    */

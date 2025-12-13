@@ -31,7 +31,7 @@ export class AssetClassifierService {
       assetType: "crypto",
       currency: "USD",
       normalizedSymbol: "BTC",
-      currencySymbol: "₿",
+      currencySymbol: "$",
       confidence: "high",
     },
     ETH: {

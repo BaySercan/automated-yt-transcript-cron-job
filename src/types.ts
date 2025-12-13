@@ -34,7 +34,13 @@ export interface Prediction {
     value: string;
   };
   target_price: number | null;
+  target_price_currency_declared?: string | null; // Currency explicitly mentioned for target price (e.g., "USD", "TRY", "EUR")
   confidence: "low" | "medium" | "high";
+  extraction_metadata?: {
+    currency_detection_confidence?: "low" | "medium" | "high"; // Confidence in detected currency
+    multiple_currencies_detected?: string[]; // List of all currencies found in text
+    selected_currency_reasoning?: string; // Why this currency was chosen if multiple were detected
+  };
 }
 
 export interface AIModification {

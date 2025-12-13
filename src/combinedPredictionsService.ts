@@ -198,7 +198,7 @@ export class CombinedPredictionsService {
       const { data: rows, error } = await supabaseService.supabase
         .from("combined_predictions")
         .select(
-          "id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, sentiment, status"
+          "id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, target_price_in_asset_currency, sentiment, status"
         )
         .eq("status", "pending")
         .limit(limit);
@@ -233,8 +233,10 @@ export class CombinedPredictionsService {
           });
 
           let targetPriceNum: number | null = null;
-          if (row.target_price) {
-            targetPriceNum = parseFloat(String(row.target_price));
+          // Use target_price_in_asset_currency if available (converted value), otherwise use target_price
+          const targetPriceForComparison = row.target_price_in_asset_currency || row.target_price;
+          if (targetPriceForComparison) {
+            targetPriceNum = parseFloat(String(targetPriceForComparison));
             if (isNaN(targetPriceNum)) targetPriceNum = null;
           }
 
@@ -660,29 +662,159 @@ export class CombinedPredictionsService {
                 continue;
               }
 
-              // Create combined row with AI model extraction tracking
-              const combinedRow = {
-                channel_id: rec.channel_id,
-                channel_name: rec.channel_name,
-                video_id: videoId,
-                post_date: postDateObj.toISOString(),
-                asset,
-                asset_type: assetType, // New field
-                asset_entry_price: entryPrice,
-                formatted_price: formattedEntryPrice,
-                price_currency: currency,
-                horizon_value: p.horizon?.value || "",
-                horizon_type: p.horizon?.type || "custom", // New field
-                horizon_start_date: horizonStart.toISOString(), // New field
-                horizon_end_date: horizonEnd.toISOString(), // New field
-                sentiment: p.sentiment || "neutral",
-                confidence: p.confidence || "medium",
-                target_price: p.target_price ? String(p.target_price) : null,
-                prediction_text: predictionText,
-                status: "pending",
-                platform: "YouTube",
-                ai_model_extraction: rec.ai_model || null, // Track which AI model extracted this
-              };
+              // Handle target price currency conversion
+              let targetPrice = p.target_price;
+              let targetPriceCurrency = p.target_price_currency_declared;
+              let targetPriceInAssetCurrency = p.target_price ? p.target_price : null;
+              let currencyConversionMetadata: any = null;
+
+              if (targetPrice !== null && targetPrice !== undefined) {
+                // If no currency was explicitly declared, use the asset's default currency
+                if (!targetPriceCurrency) {
+                  targetPriceCurrency = currency;
+                  this.log("info", `No currency declared for ${asset} target price, using asset default: ${currency}`, {
+                    videoId,
+                    asset,
+                    targetPrice,
+                  });
+                }
+
+                // If declared currency differs from asset currency, perform conversion
+                if (targetPriceCurrency !== currency) {
+                  try {
+                    this.log("info", `Converting target price from ${targetPriceCurrency} to ${currency}`, {
+                      videoId,
+                      asset,
+                      originalPrice: targetPrice,
+                      targetCurrency: currency,
+                    });
+
+                    const conversionResult = await priceService.convertPriceToCurrency(
+                      targetPrice,
+                      targetPriceCurrency,
+                      currency,
+                      postDateObj
+                    );
+
+                    if (conversionResult !== null) {
+                      targetPriceInAssetCurrency = conversionResult;
+
+                      // Get the exchange rate for metadata recording
+                      const rateInfo = await priceService.getExchangeRateForDate(
+                        targetPriceCurrency,
+                        currency,
+                        postDateObj
+                      );
+
+                      currencyConversionMetadata = {
+                        currency_declared: targetPriceCurrency,
+                        asset_currency: currency,
+                        exchange_rate_used: rateInfo.rate,
+                        conversion_date: rateInfo.date_found,
+                        exchange_rate_source: rateInfo.source,
+                        original_target_price: targetPrice,
+                        converted_target_price: targetPriceInAssetCurrency,
+                        ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
+                        multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
+                        currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                      };
+
+                      this.log("info", `Target price conversion successful`, {
+                        videoId,
+                        asset,
+                        fromPrice: targetPrice,
+                        toPrice: targetPriceInAssetCurrency,
+                        rate: rateInfo.rate,
+                        rateSource: rateInfo.source,
+                      });
+                    } else {
+                      this.log("warn", `Target price conversion failed, using original price`, {
+                        videoId,
+                        asset,
+                        originalPrice: targetPrice,
+                        fromCurrency: targetPriceCurrency,
+                        toCurrency: currency,
+                      });
+
+                      // Store failed conversion in metadata
+                      currencyConversionMetadata = {
+                        currency_declared: targetPriceCurrency,
+                        asset_currency: currency,
+                        exchange_rate_used: null,
+                        conversion_date: postDateObj.toISOString().split("T")[0],
+                        exchange_rate_source: "failed",
+                        original_target_price: targetPrice,
+                        converted_target_price: null,
+                        conversion_error: "Could not fetch exchange rate",
+                        ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
+                        multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
+                        currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                      };
+                    }
+                  } catch (convErr) {
+                    this.log("error", `Error during currency conversion`, {
+                      err: this.safeErrorMessage(convErr),
+                      videoId,
+                      asset,
+                    });
+
+                    currencyConversionMetadata = {
+                      currency_declared: targetPriceCurrency,
+                      asset_currency: currency,
+                      exchange_rate_used: null,
+                      conversion_date: postDateObj.toISOString().split("T")[0],
+                      exchange_rate_source: "error",
+                      original_target_price: targetPrice,
+                      converted_target_price: null,
+                      conversion_error: this.safeErrorMessage(convErr),
+                      ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
+                      multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
+                      currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                    };
+                  }
+                } else {
+                  // Same currency, no conversion needed
+                  currencyConversionMetadata = {
+                    currency_declared: targetPriceCurrency,
+                    asset_currency: currency,
+                    exchange_rate_used: 1,
+                    conversion_date: postDateObj.toISOString().split("T")[0],
+                    exchange_rate_source: "cache",
+                    original_target_price: targetPrice,
+                    converted_target_price: targetPriceInAssetCurrency,
+                    ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
+                    multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
+                    currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                  };
+                }
+              }
+
+  // Create combined row with AI model extraction tracking and currency conversion
+  const combinedRow = {
+    channel_id: rec.channel_id,
+    channel_name: rec.channel_name,
+    video_id: videoId,
+    post_date: postDateObj.toISOString(),
+    asset,
+    asset_type: assetType,
+    asset_entry_price: entryPrice,
+    formatted_price: formattedEntryPrice,
+    price_currency: currency,
+    horizon_value: p.horizon?.value || "",
+    horizon_type: p.horizon?.type || "custom",
+    horizon_start_date: horizonStart.toISOString(),
+    horizon_end_date: horizonEnd.toISOString(),
+    sentiment: p.sentiment || "neutral",
+    confidence: p.confidence || "medium",
+    target_price: targetPrice ? String(targetPrice) : null, // NOW CONTAINS CONVERTED PRICE - ready for comparison
+    target_price_currency: targetPriceCurrency, // New field: currency declared in prediction
+    necessary_conditions_for_prediction: p.necessary_conditions_for_prediction || null, // New field: prediction conditions
+    currency_conversion_metadata: currencyConversionMetadata ? JSON.stringify(currencyConversionMetadata) : null,
+    prediction_text: predictionText,
+    status: "pending",
+    platform: "YouTube",
+    ai_model_extraction: rec.ai_model || null,
+  };
 
               if (!dryRun) {
                 const { error: insertError } = await supabaseService.supabase

@@ -53,7 +53,7 @@ export const config = {
   youtubeApiQuota: 10000,
 
   // OpenRouter settings
-  openrouterTemperature: 0.3,
+  openrouterTemperature: 0.4,
   openrouterMaxTokens: 16000, // Increased for DeepSeek V3.1
 
   // RapidAPI settings

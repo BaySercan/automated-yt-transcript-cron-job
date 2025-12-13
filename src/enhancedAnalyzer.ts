@@ -78,11 +78,44 @@ PREDICTION EXTRACTION RULESET
    bearish → negative direction or fall expected  
    neutral → future-oriented but no direction
 
-2. TARGET PRICE
+2. TARGET PRICE & CURRENCY DETECTION
    - Must be numeric (integer or float)
-   - Convert formats like “13.500” to 13500
+   - Convert formats like "13.500" to 13500
    - If it is obviously a transcription error → correct and document in ai_modifications
    - If no target price explicitly stated → null
+
+   **CRITICAL: CURRENCY DETECTION (MULTILINGUAL)**
+   - Extract target_price_currency_declared ONLY when currency is explicitly mentioned
+   - If NO currency mentioned → return null (use asset's default currency)
+   - If MULTIPLE currencies mentioned → pick the most suitable one for the target price
+
+   **LANGUAGE-SPECIFIC CURRENCY MAPPING:**
+   - English: "$" → USD, "€" → EUR, "£" → GBP, "dollar" → USD, "euro" → EUR, "pound" → GBP
+   - Turkish: "dolar" → USD, "dolar seviyesi" → USD, "dolar bazlı" → USD, "lira" → TRY, "TL" → TRY, "euro" → EUR, "avro" → EUR
+   - Spanish: "dólar" → USD, "euro" → EUR, "libra" → GBP
+   - German: "Dollar" → USD, "Euro" → EUR, "Pfund" → GBP
+   - French: "dollar" → USD, "euro" → EUR, "livre" → GBP
+
+   **TURKISH-SPECIFIC RULES (CRITICAL):**
+   - "dolar" ALWAYS means USD (American dollar), NOT Turkish currency
+   - "dolar seviyesi" → USD level
+   - "dolar bazlı" → USD-based
+   - "dolar kuru" → USD exchange rate
+   - "lira", "TL", "Türk Lirası" → TRY (Turkish Lira)
+   - "euro", "avro" → EUR
+
+   **EXAMPLES:**
+   - "300 dolar seviyesine" → target_price: 300, target_price_currency_declared: "USD"
+   - "277 dolar seviyesi üzerine" → target_price: 277, target_price_currency_declared: "USD"
+   - "217 dolar seviyelerine" → target_price: 217, target_price_currency_declared: "USD"
+   - "11.000 lira" → target_price: 11000, target_price_currency_declared: "TRY"
+   - "300 TL" → target_price: 300, target_price_currency_declared: "TRY"
+
+   **MULTIPLE CURRENCIES:**
+   - If prediction mentions multiple currencies, select the one most relevant to the target price
+   - Document ALL detected currencies in extraction_metadata.multiple_currencies_detected
+   - Provide reasoning in extraction_metadata.selected_currency_reasoning
+   - Set extraction_metadata.currency_detection_confidence based on clarity
 
 3. NECESSARY CONDITIONS
    Extract ONLY if explicitly stated (“must hold above 50k”, “if inflation drops”).
@@ -158,7 +191,13 @@ You MUST return ONLY one JSON object with NO text outside it:
         "value": "<string>"
       },
       "target_price": <number or null>,
-      "confidence": "<low | medium | high>"
+      "target_price_currency_declared": "<string or null>",
+      "confidence": "<low | medium | high>",
+      "extraction_metadata": {
+        "currency_detection_confidence": "<low | medium | high>",
+        "multiple_currencies_detected": ["<currency1>", "<currency2>"],
+        "selected_currency_reasoning": "<explanation if multiple detected>"
+      }
     }
   ],
   "ai_modifications": [
@@ -933,7 +972,10 @@ Turkish speakers often discuss two different gold products:
         prediction_date: this.validateDate(pred.prediction_date),
         horizon: this.validateHorizon(pred.horizon),
         target_price: this.validateTargetPrice(pred.target_price),
+        target_price_currency_declared: pred.target_price_currency_declared || null,
+        necessary_conditions_for_prediction: pred.necessary_conditions_for_prediction || null,
         confidence: this.validateConfidence(pred.confidence),
+        extraction_metadata: pred.extraction_metadata || null,
       }))
       .filter((pred) => pred.asset && pred.prediction_text);
   }
