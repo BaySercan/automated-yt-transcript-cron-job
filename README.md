@@ -40,6 +40,7 @@ The cron job automatically:
   - **Primary**: Yahoo Finance (with 3-day window for timezone handling)
   - **Fallback**: Stooq.com (with automatic retry on previous days)
   - **Crypto**: CoinMarketCap (current) + CoinGecko (historical)
+  - **Special**: Twelve Data (XAUTRYG - Gram Gold/TRY)
   - **Last Resort**: Google Finance (current prices only)
 - **🎯 Smart Verification**:
 
@@ -64,7 +65,7 @@ The cron job automatically:
 - **Scheduler**: Northflank Cron Job (daily at 23:30)
 - **Database**: Supabase (PostgreSQL)
 - **AI Provider**: OpenRouter API (for transcript analysis)
-- **Price APIs**: Yahoo Finance, Stooq, CoinMarketCap, CoinGecko, Google Finance
+- **Price APIs**: Yahoo Finance, Twelve Data, Stooq, CoinMarketCap, CoinGecko, Google Finance
 - **Deployment**: Docker
 - **Configuration**: Environment variables
 
@@ -87,6 +88,7 @@ The cron job automatically:
  │  ├─ reportingService.ts       # NEW: Centralized statistics and reporting
  │  ├─ priceService.ts           # Multi-provider price fetching with persistent cache
  │  ├─ yahooService.ts           # Yahoo Finance integration (3-day window)
+ │  ├─ twelveDataService.ts      # Twelve Data integration (XAUTRYG)
  │  ├─ stooqService.ts           # Stooq.com fallback service (retry logic)
  │  └─ usagoldService.ts         # USAGOLD integration for precious metals
  └─ version.ts                   # Version management and build information
@@ -141,7 +143,7 @@ The service now uses a **Persistent Cache Strategy**:
 3. **External API**: If not found, fetch from external providers (Yahoo, Stooq, etc.).
 4. **Save to Cache**: Successfully fetched prices are saved to `asset_prices` for future use (forever).
 
-## 🔄 Recent Updates (v2.0.0)
+## 🔄 Recent Updates (v2.0.3)
 
 ### Major Refactoring & Statistics
 
@@ -155,6 +157,7 @@ The service now uses a **Persistent Cache Strategy**:
 ### Price Fetching & Verification
 
 - ✅ **Stooq Fallback**: Added Stooq.com as fallback price source
+- ✅ **Twelve Data Integration**: Dedicated source for Turkish Gram Gold (XAUTRYG)
 - ✅ **BIST 100 Support**: Full support for Istanbul Stock Exchange (XU100.IS → ^xutry)
 - ✅ **3-Day Window**: Yahoo Finance now uses 3-day window for reliability
 - ✅ **Retry Logic**: Stooq automatically retries previous days for missing data

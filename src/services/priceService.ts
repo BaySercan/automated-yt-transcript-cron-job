@@ -7,6 +7,7 @@ import { stooqService } from "./stooqService";
 import { supabaseService } from "../supabase";
 import { usagoldService } from "./usagoldService";
 import { reportingService } from "./reportingService";
+import { twelveDataService } from "./twelveDataService";
 
 export class PriceService {
   private readonly USER_AGENT = "Mozilla/5.0";
@@ -338,13 +339,12 @@ export class PriceService {
   ) {
     try {
       const formattedDate = date.toISOString().split("T")[0];
-      // We use upsert to handle potential race conditions or duplicates
-      // asset_prices has unique(asset, date) constraint logic assumption,
-      // but strictly dependent on unique constraint.
+      // Normalize asset name (e.g. BIST 100 -> BIST100)
+      const normalizedAsset = this.normalizeAssetName(asset);
 
       await supabaseService.supabase.from("asset_prices").upsert(
         {
-          asset: asset.toUpperCase(),
+          asset: normalizedAsset,
           date: formattedDate,
           price: price,
           currency: currency,
@@ -372,9 +372,11 @@ export class PriceService {
     if (priceMap.size === 0) return;
 
     const rows = [];
+    const normalizedAsset = this.normalizeAssetName(asset);
+
     for (const [dateStr, price] of priceMap.entries()) {
       rows.push({
-        asset: asset.toUpperCase(),
+        asset: normalizedAsset,
         date: dateStr,
         price: price,
         currency: currency,
@@ -410,11 +412,19 @@ export class PriceService {
     fromCurrency: string,
     toCurrency: string,
     date: Date
-  ): Promise<{ rate: number | null; source: "cache" | "api"; date_found: string }> {
+  ): Promise<{
+    rate: number | null;
+    source: "cache" | "api";
+    date_found: string;
+  }> {
     try {
       if (!fromCurrency || !toCurrency || fromCurrency === toCurrency) {
         // No conversion needed if same currency
-        return { rate: 1, source: "cache", date_found: date.toISOString().split("T")[0] };
+        return {
+          rate: 1,
+          source: "cache",
+          date_found: date.toISOString().split("T")[0],
+        };
       }
 
       const fromUpper = fromCurrency.toUpperCase();
@@ -440,7 +450,11 @@ export class PriceService {
           logger.info(
             `Found cached exchange rate for ${pairSymbol} on ${formattedDate}: ${data.price}`
           );
-          return { rate: Number(data.price), source: "cache", date_found: data.date };
+          return {
+            rate: Number(data.price),
+            source: "cache",
+            date_found: data.date,
+          };
         }
       } catch (tableErr) {
         logger.debug(`asset_prices table lookup failed: ${tableErr}`);
@@ -448,9 +462,13 @@ export class PriceService {
 
       // Step 2: Try Yahoo Finance API for historical rate
       // Use special symbols mapping for forex pairs
-      const yahooSymbol = this.SPECIAL_SYMBOLS[pairSymbol.toLowerCase()] || `${fromUpper}${toUpper}=X`;
+      const yahooSymbol =
+        this.SPECIAL_SYMBOLS[pairSymbol.toLowerCase()] ||
+        `${fromUpper}${toUpper}=X`;
 
-      logger.info(`Querying Yahoo Finance API for ${yahooSymbol} on ${formattedDate}...`);
+      logger.info(
+        `Querying Yahoo Finance API for ${yahooSymbol} on ${formattedDate}...`
+      );
 
       try {
         const rate = await yahooService.getHistory(yahooSymbol, date);
@@ -461,12 +479,20 @@ export class PriceService {
           );
 
           // Store in asset_prices table for future use
-          this.saveToAssetPriceTable(pairSymbol, date, rate, "rate", "yahoo_finance");
+          this.saveToAssetPriceTable(
+            pairSymbol,
+            date,
+            rate,
+            "rate",
+            "yahoo_finance"
+          );
 
           return { rate, source: "api", date_found: formattedDate };
         }
       } catch (apiErr) {
-        logger.warn(`Yahoo Finance API lookup failed for ${yahooSymbol}: ${apiErr}`);
+        logger.warn(
+          `Yahoo Finance API lookup failed for ${yahooSymbol}: ${apiErr}`
+        );
       }
 
       // Step 3: If date is recent, try fetching today's rate and using it as approximation
@@ -477,7 +503,10 @@ export class PriceService {
             `${formattedDate} rate not found, trying to get current ${pairSymbol} rate...`
           );
           const currentDate = new Date();
-          const currentRate = await yahooService.getHistory(yahooSymbol, currentDate);
+          const currentRate = await yahooService.getHistory(
+            yahooSymbol,
+            currentDate
+          );
 
           if (currentRate !== null) {
             logger.info(
@@ -497,7 +526,11 @@ export class PriceService {
       return { rate: null, source: "api", date_found: formattedDate };
     } catch (error) {
       logger.error(`Error getting exchange rate: ${error}`);
-      return { rate: null, source: "api", date_found: date.toISOString().split("T")[0] };
+      return {
+        rate: null,
+        source: "api",
+        date_found: date.toISOString().split("T")[0],
+      };
     }
   }
 
@@ -694,15 +727,24 @@ export class PriceService {
         // For now, this will fallback to Yahoo Finance which may have XAUTRY or similar
         if (assetUpper === "XAUTRYG") {
           logger.info(
-            `Fetching gram gold price (TRY) for Turkish market (XAUTRYG)...`
+            `Fetching gram gold price (TRY) for Turkish market (XAUTRYG) via Twelve Data...`
           );
-          // Try GAUTRYG first (gram gold in Turkish lira via Yahoo Finance/Stooq)
-          logger.debug(`Attempting XAUTRYG fallback to GAUTRYG...`);
-          // XAUTRYG is a local Turkish market instrument
-          // Fallback strategy: 
-          // 1. Try GAUTRYG (gram gold TRY) via Yahoo Finance
-          // 2. Try GOLD/XAUUSD and convert to TRY if needed
-          // Will be handled by Yahoo Finance/Stooq fallback below
+          const tdPrice = await twelveDataService.getLivePrice();
+          if (tdPrice !== null) {
+            reportingService.incrementPriceApiCall("twelvedata");
+            reportingService.incrementPriceSuccess();
+            this.saveToAssetPriceTable(
+              asset,
+              date,
+              tdPrice,
+              "TRY",
+              "twelvedata"
+            );
+            return tdPrice;
+          }
+          logger.warn(
+            "Twelve Data live fetch failed for XAUTRYG, falling back to generic providers..."
+          );
         }
 
         if (
@@ -724,6 +766,24 @@ export class PriceService {
             );
             return silverPrice;
           }
+        }
+      }
+
+      // 3.5. XAUTRYG Historical via Twelve Data
+      if (assetUpper === "XAUTRYG" && !isToday) {
+        logger.info(`Fetching historical XAUTRYG price from Twelve Data...`);
+        const tdHistPrice = await twelveDataService.getHistoricalPrice(date);
+        if (tdHistPrice !== null) {
+          reportingService.incrementPriceApiCall("twelvedata");
+          reportingService.incrementPriceSuccess();
+          this.saveToAssetPriceTable(
+            asset,
+            date,
+            tdHistPrice,
+            "TRY",
+            "twelvedata"
+          );
+          return tdHistPrice;
         }
       }
 
@@ -860,7 +920,9 @@ export class PriceService {
     const exactPrice = await this.searchPrice(asset, date, assetType);
     if (exactPrice !== null) {
       logger.info(
-        `Found price for ${asset} on exact date ${date.toISOString().split("T")[0]}: ${exactPrice}`
+        `Found price for ${asset} on exact date ${
+          date.toISOString().split("T")[0]
+        }: ${exactPrice}`
       );
       return exactPrice;
     }
@@ -881,7 +943,9 @@ export class PriceService {
       );
       if (fallbackPrice !== null) {
         logger.info(
-          `Found price for ${asset} on fallback date ${fallbackDate.toISOString().split("T")[0]} (${i} day(s) back): ${fallbackPrice}`
+          `Found price for ${asset} on fallback date ${
+            fallbackDate.toISOString().split("T")[0]
+          } (${i} day(s) back): ${fallbackPrice}`
         );
         return fallbackPrice;
       }
