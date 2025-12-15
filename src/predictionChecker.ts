@@ -7,7 +7,7 @@ import { logger } from './utils';
  * - Now simplified to just trigger the service, as date range logic is handled internally
  */
 export async function runPredictionChecks(options: { limit?: number; dryRun?: boolean; useAI?: boolean } = {}) {
-  const limit = options.limit ?? 500;
+  const limit = options.limit ?? 10000; // Increased from 500 to process more predictions
   const dryRun = options.dryRun ?? false;
   const useAI = options.useAI ?? true;
 

@@ -194,16 +194,31 @@ export class CombinedPredictionsService {
     });
 
     try {
-      // Fetch pending predictions
+      // Fetch pending predictions - order by horizon_end_date to process oldest first
       const { data: rows, error } = await supabaseService.supabase
         .from("combined_predictions")
         .select(
-          "id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, target_price_in_asset_currency, sentiment, status"
+          "id, asset, asset_type, post_date, horizon_value, horizon_type, horizon_start_date, horizon_end_date, asset_entry_price, target_price, sentiment, status"
         )
         .eq("status", "pending")
+        .order("horizon_end_date", { ascending: true }) // Process oldest predictions first
+        .order("horizon_end_date", { ascending: true }) // Process oldest predictions first
         .limit(limit);
 
-      if (error) return;
+      if (error) {
+        this.log("error", "Error fetching pending predictions", {
+          error: this.safeErrorMessage(error),
+        });
+        return;
+      }
+
+      this.log(
+        "info",
+        `Fetched ${rows?.length || 0} pending predictions for reconciliation`,
+        {
+          requestId,
+        }
+      );
 
       const now = new Date();
 
@@ -234,7 +249,7 @@ export class CombinedPredictionsService {
 
           let targetPriceNum: number | null = null;
           // Use target_price_in_asset_currency if available (converted value), otherwise use target_price
-          const targetPriceForComparison = row.target_price_in_asset_currency || row.target_price;
+          const targetPriceForComparison = row.target_price;
           if (targetPriceForComparison) {
             targetPriceNum = parseFloat(String(targetPriceForComparison));
             if (isNaN(targetPriceNum)) targetPriceNum = null;
@@ -390,12 +405,14 @@ export class CombinedPredictionsService {
 
             // Always set reasoning (even if it's the rule-based one)
             if (aiReconciliationReasoning) {
-              updateData.ai_reconciliation_reasoning = aiReconciliationReasoning;
+              updateData.ai_reconciliation_reasoning =
+                aiReconciliationReasoning;
             } else {
               // Fallback to rule-based reasoning
-              updateData.ai_reconciliation_reasoning = finalStatus === 'correct' 
-                ? 'Rule-based verification: Prediction target met'
-                : 'Rule-based verification: Prediction target not met';
+              updateData.ai_reconciliation_reasoning =
+                finalStatus === "correct"
+                  ? "Rule-based verification: Prediction target met"
+                  : "Rule-based verification: Prediction target not met";
             }
 
             await supabaseService.supabase
@@ -593,10 +610,11 @@ export class CombinedPredictionsService {
 
               if (!assetType) {
                 try {
-                  const classification = await assetClassifierService.classifyAsset(
-                    asset,
-                    p.prediction_text || ""
-                  );
+                  const classification =
+                    await assetClassifierService.classifyAsset(
+                      asset,
+                      p.prediction_text || ""
+                    );
                   assetType = classification.assetType;
                   currency = classification.currency;
                   currencySymbol = classification.currencySymbol;
@@ -609,9 +627,13 @@ export class CombinedPredictionsService {
                   });
                 } catch (classifyErr) {
                   // Fallback to basic inference if AI fails
-                  this.log("warn", `Asset classification failed for ${asset}, using fallback`, {
-                    error: this.safeErrorMessage(classifyErr),
-                  });
+                  this.log(
+                    "warn",
+                    `Asset classification failed for ${asset}, using fallback`,
+                    {
+                      error: this.safeErrorMessage(classifyErr),
+                    }
+                  );
                   assetType = this.inferAssetType(asset);
                   currency = priceService.detectCurrency(ticker, assetType);
                   currencySymbol = priceService.getCurrencySymbol(currency);
@@ -630,7 +652,10 @@ export class CombinedPredictionsService {
                   assetType,
                   3 // maxLookbackDays for initial fetch
                 );
-                if (price !== null && this.isValidEntryPrice(price, assetType, asset)) {
+                if (
+                  price !== null &&
+                  this.isValidEntryPrice(price, assetType, asset)
+                ) {
                   entryPrice = String(price);
                   // Use AI-determined currency symbol from classification for proper display formatting
                   // Indices will have empty currencySymbol, other assets will have €, $, ₺, etc.
@@ -653,11 +678,15 @@ export class CombinedPredictionsService {
 
               // Validate entry price is available before creating combined prediction
               if (entryPrice === null || entryPrice === undefined) {
-                this.log("warn", `Skipping prediction without entry price for ${asset}`, {
-                  videoId,
-                  asset,
-                  symbol: p.asset,
-                });
+                this.log(
+                  "warn",
+                  `Skipping prediction without entry price for ${asset}`,
+                  {
+                    videoId,
+                    asset,
+                    symbol: p.asset,
+                  }
+                );
                 skipped++;
                 continue;
               }
@@ -665,46 +694,58 @@ export class CombinedPredictionsService {
               // Handle target price currency conversion
               let targetPrice = p.target_price;
               let targetPriceCurrency = p.target_price_currency_declared;
-              let targetPriceInAssetCurrency = p.target_price ? p.target_price : null;
+              let targetPriceInAssetCurrency = p.target_price
+                ? p.target_price
+                : null;
               let currencyConversionMetadata: any = null;
 
               if (targetPrice !== null && targetPrice !== undefined) {
                 // If no currency was explicitly declared, use the asset's default currency
                 if (!targetPriceCurrency) {
                   targetPriceCurrency = currency;
-                  this.log("info", `No currency declared for ${asset} target price, using asset default: ${currency}`, {
-                    videoId,
-                    asset,
-                    targetPrice,
-                  });
+                  this.log(
+                    "info",
+                    `No currency declared for ${asset} target price, using asset default: ${currency}`,
+                    {
+                      videoId,
+                      asset,
+                      targetPrice,
+                    }
+                  );
                 }
 
                 // If declared currency differs from asset currency, perform conversion
                 if (targetPriceCurrency !== currency) {
                   try {
-                    this.log("info", `Converting target price from ${targetPriceCurrency} to ${currency}`, {
-                      videoId,
-                      asset,
-                      originalPrice: targetPrice,
-                      targetCurrency: currency,
-                    });
-
-                    const conversionResult = await priceService.convertPriceToCurrency(
-                      targetPrice,
-                      targetPriceCurrency,
-                      currency,
-                      postDateObj
+                    this.log(
+                      "info",
+                      `Converting target price from ${targetPriceCurrency} to ${currency}`,
+                      {
+                        videoId,
+                        asset,
+                        originalPrice: targetPrice,
+                        targetCurrency: currency,
+                      }
                     );
+
+                    const conversionResult =
+                      await priceService.convertPriceToCurrency(
+                        targetPrice,
+                        targetPriceCurrency,
+                        currency,
+                        postDateObj
+                      );
 
                     if (conversionResult !== null) {
                       targetPriceInAssetCurrency = conversionResult;
 
                       // Get the exchange rate for metadata recording
-                      const rateInfo = await priceService.getExchangeRateForDate(
-                        targetPriceCurrency,
-                        currency,
-                        postDateObj
-                      );
+                      const rateInfo =
+                        await priceService.getExchangeRateForDate(
+                          targetPriceCurrency,
+                          currency,
+                          postDateObj
+                        );
 
                       currencyConversionMetadata = {
                         currency_declared: targetPriceCurrency,
@@ -714,9 +755,15 @@ export class CombinedPredictionsService {
                         exchange_rate_source: rateInfo.source,
                         original_target_price: targetPrice,
                         converted_target_price: targetPriceInAssetCurrency,
-                        ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
-                        multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
-                        currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                        ai_extraction_reasoning:
+                          p.extraction_metadata?.selected_currency_reasoning ||
+                          null,
+                        multiple_currencies_detected:
+                          p.extraction_metadata?.multiple_currencies_detected ||
+                          null,
+                        currency_detection_confidence:
+                          p.extraction_metadata
+                            ?.currency_detection_confidence || "medium",
                       };
 
                       this.log("info", `Target price conversion successful`, {
@@ -728,27 +775,39 @@ export class CombinedPredictionsService {
                         rateSource: rateInfo.source,
                       });
                     } else {
-                      this.log("warn", `Target price conversion failed, using original price`, {
-                        videoId,
-                        asset,
-                        originalPrice: targetPrice,
-                        fromCurrency: targetPriceCurrency,
-                        toCurrency: currency,
-                      });
+                      this.log(
+                        "warn",
+                        `Target price conversion failed, using original price`,
+                        {
+                          videoId,
+                          asset,
+                          originalPrice: targetPrice,
+                          fromCurrency: targetPriceCurrency,
+                          toCurrency: currency,
+                        }
+                      );
 
                       // Store failed conversion in metadata
                       currencyConversionMetadata = {
                         currency_declared: targetPriceCurrency,
                         asset_currency: currency,
                         exchange_rate_used: null,
-                        conversion_date: postDateObj.toISOString().split("T")[0],
+                        conversion_date: postDateObj
+                          .toISOString()
+                          .split("T")[0],
                         exchange_rate_source: "failed",
                         original_target_price: targetPrice,
                         converted_target_price: null,
                         conversion_error: "Could not fetch exchange rate",
-                        ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
-                        multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
-                        currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                        ai_extraction_reasoning:
+                          p.extraction_metadata?.selected_currency_reasoning ||
+                          null,
+                        multiple_currencies_detected:
+                          p.extraction_metadata?.multiple_currencies_detected ||
+                          null,
+                        currency_detection_confidence:
+                          p.extraction_metadata
+                            ?.currency_detection_confidence || "medium",
                       };
                     }
                   } catch (convErr) {
@@ -767,9 +826,15 @@ export class CombinedPredictionsService {
                       original_target_price: targetPrice,
                       converted_target_price: null,
                       conversion_error: this.safeErrorMessage(convErr),
-                      ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
-                      multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
-                      currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                      ai_extraction_reasoning:
+                        p.extraction_metadata?.selected_currency_reasoning ||
+                        null,
+                      multiple_currencies_detected:
+                        p.extraction_metadata?.multiple_currencies_detected ||
+                        null,
+                      currency_detection_confidence:
+                        p.extraction_metadata?.currency_detection_confidence ||
+                        "medium",
                     };
                   }
                 } else {
@@ -782,39 +847,48 @@ export class CombinedPredictionsService {
                     exchange_rate_source: "cache",
                     original_target_price: targetPrice,
                     converted_target_price: targetPriceInAssetCurrency,
-                    ai_extraction_reasoning: p.extraction_metadata?.selected_currency_reasoning || null,
-                    multiple_currencies_detected: p.extraction_metadata?.multiple_currencies_detected || null,
-                    currency_detection_confidence: p.extraction_metadata?.currency_detection_confidence || "medium",
+                    ai_extraction_reasoning:
+                      p.extraction_metadata?.selected_currency_reasoning ||
+                      null,
+                    multiple_currencies_detected:
+                      p.extraction_metadata?.multiple_currencies_detected ||
+                      null,
+                    currency_detection_confidence:
+                      p.extraction_metadata?.currency_detection_confidence ||
+                      "medium",
                   };
                 }
               }
 
-  // Create combined row with AI model extraction tracking and currency conversion
-  const combinedRow = {
-    channel_id: rec.channel_id,
-    channel_name: rec.channel_name,
-    video_id: videoId,
-    post_date: postDateObj.toISOString(),
-    asset,
-    asset_type: assetType,
-    asset_entry_price: entryPrice,
-    formatted_price: formattedEntryPrice,
-    price_currency: currency,
-    horizon_value: p.horizon?.value || "",
-    horizon_type: p.horizon?.type || "custom",
-    horizon_start_date: horizonStart.toISOString(),
-    horizon_end_date: horizonEnd.toISOString(),
-    sentiment: p.sentiment || "neutral",
-    confidence: p.confidence || "medium",
-    target_price: targetPrice ? String(targetPrice) : null, // NOW CONTAINS CONVERTED PRICE - ready for comparison
-    target_price_currency: targetPriceCurrency, // New field: currency declared in prediction
-    necessary_conditions_for_prediction: p.necessary_conditions_for_prediction || null, // New field: prediction conditions
-    currency_conversion_metadata: currencyConversionMetadata ? JSON.stringify(currencyConversionMetadata) : null,
-    prediction_text: predictionText,
-    status: "pending",
-    platform: "YouTube",
-    ai_model_extraction: rec.ai_model || null,
-  };
+              // Create combined row with AI model extraction tracking and currency conversion
+              const combinedRow = {
+                channel_id: rec.channel_id,
+                channel_name: rec.channel_name,
+                video_id: videoId,
+                post_date: postDateObj.toISOString(),
+                asset,
+                asset_type: assetType,
+                asset_entry_price: entryPrice,
+                formatted_price: formattedEntryPrice,
+                price_currency: currency,
+                horizon_value: p.horizon?.value || "",
+                horizon_type: p.horizon?.type || "custom",
+                horizon_start_date: horizonStart.toISOString(),
+                horizon_end_date: horizonEnd.toISOString(),
+                sentiment: p.sentiment || "neutral",
+                confidence: p.confidence || "medium",
+                target_price: targetPrice ? String(targetPrice) : null, // NOW CONTAINS CONVERTED PRICE - ready for comparison
+                target_price_currency: targetPriceCurrency, // New field: currency declared in prediction
+                necessary_conditions_for_prediction:
+                  p.necessary_conditions_for_prediction || null, // New field: prediction conditions
+                currency_conversion_metadata: currencyConversionMetadata
+                  ? JSON.stringify(currencyConversionMetadata)
+                  : null,
+                prediction_text: predictionText,
+                status: "pending",
+                platform: "YouTube",
+                ai_model_extraction: rec.ai_model || null,
+              };
 
               if (!dryRun) {
                 const { error: insertError } = await supabaseService.supabase
@@ -920,15 +994,9 @@ export class CombinedPredictionsService {
       return "crypto";
 
     if (
-      [
-        "GOLD",
-        "SILVER",
-        "CRUDE",
-        "OIL",
-        "NATURALGAS",
-        "BRENT",
-        "WTI",
-      ].includes(upper)
+      ["GOLD", "SILVER", "CRUDE", "OIL", "NATURALGAS", "BRENT", "WTI"].includes(
+        upper
+      )
     )
       return "commodity";
 
@@ -1017,9 +1085,13 @@ export class CombinedPredictionsService {
               assetType = classification.assetType;
             } catch (classifyErr) {
               // Fallback to basic inference if AI fails
-              this.log("warn", `Asset classification failed for ${asset} in retry, using fallback`, {
-                error: this.safeErrorMessage(classifyErr),
-              });
+              this.log(
+                "warn",
+                `Asset classification failed for ${asset} in retry, using fallback`,
+                {
+                  error: this.safeErrorMessage(classifyErr),
+                }
+              );
               assetType = this.inferAssetType(asset);
             }
           }
@@ -1052,10 +1124,14 @@ export class CombinedPredictionsService {
               });
               failed++;
             } else {
-              this.log("info", `Updated entry price for ${asset} via fallback search`, {
-                id: row.id,
-                price,
-              });
+              this.log(
+                "info",
+                `Updated entry price for ${asset} via fallback search`,
+                {
+                  id: row.id,
+                  price,
+                }
+              );
               updated++;
             }
           } else if (price === null) {
@@ -1073,11 +1149,11 @@ export class CombinedPredictionsService {
                   last_retry_at: new Date().toISOString(),
                 })
                 .eq("id", row.id);
-              
+
               if (retryMetaError) {
-                this.log("warn", "Failed to update retry metadata", { 
-                  id: row.id, 
-                  error: this.safeErrorMessage(retryMetaError) 
+                this.log("warn", "Failed to update retry metadata", {
+                  id: row.id,
+                  error: this.safeErrorMessage(retryMetaError),
                 });
               }
             }
@@ -1123,7 +1199,11 @@ export class CombinedPredictionsService {
    * Validate entry price is within reasonable bounds for the asset type
    * Detects obviously wrong prices (e.g., SPX showing 35 instead of 6500)
    */
-  private isValidEntryPrice(price: number | null, assetType: string, asset: string): boolean {
+  private isValidEntryPrice(
+    price: number | null,
+    assetType: string,
+    asset: string
+  ): boolean {
     if (price === null || price === undefined || price <= 0) {
       return false;
     }
@@ -1132,40 +1212,48 @@ export class CombinedPredictionsService {
     // These are conservative ranges to catch obvious parsing errors
     const bounds: { [key: string]: [number, number] } = {
       // Indices: reasonable ranges (in index points)
-      'SPX|S&P 500|^GSPC': [5000, 8500],
-      'NDX|NASDAQ|^IXIC': [15000, 35000],
-      'BIST100': [8000, 11000],
-      'DAX': [16000, 20000],
-      'FTSE': [7000, 8500],
+      "SPX|S&P 500|^GSPC": [5000, 8500],
+      "NDX|NASDAQ|^IXIC": [15000, 35000],
+      BIST100: [8000, 11000],
+      DAX: [16000, 20000],
+      FTSE: [7000, 8500],
 
       // Crypto: reasonable ranges (in USD)
-      'BTC|BITCOIN': [20000, 200000],
-      'ETH|ETHEREUM': [1000, 20000],
-      'SOL': [100, 500],
+      "BTC|BITCOIN": [20000, 200000],
+      "ETH|ETHEREUM": [1000, 20000],
+      SOL: [100, 500],
 
       // Commodities: reasonable ranges (in USD per unit)
-      'GOLD|XAU': [1500, 2500],
-      'SILVER|XAG': [25, 50],
-      'OIL|CRUDE': [50, 150],
+      "GOLD|XAU": [1500, 2500],
+      "SILVER|XAG": [25, 50],
+      "OIL|CRUDE": [50, 150],
 
       // FX pairs: reasonable ranges (in quote currency units)
-      'USD': [0.001, 200],  // Generic USD pair
-      'EUR': [1, 2],
-      'GBP': [1, 2],
-      'JPY': [0.005, 0.02],
-      'TRY': [30, 50],
+      USD: [0.001, 200], // Generic USD pair
+      EUR: [1, 2],
+      GBP: [1, 2],
+      JPY: [0.005, 0.02],
+      TRY: [30, 50],
     };
 
-    const normalizedAsset = (asset || '').toUpperCase();
-    const normalizedType = (assetType || '').toLowerCase();
+    const normalizedAsset = (asset || "").toUpperCase();
+    const normalizedType = (assetType || "").toLowerCase();
 
     // Find matching bound
     for (const [key, [min, max]] of Object.entries(bounds)) {
-      const patterns = key.split('|');
-      if (patterns.some(p => normalizedAsset.includes(p) || normalizedAsset.includes(p.toUpperCase()))) {
+      const patterns = key.split("|");
+      if (
+        patterns.some(
+          (p) =>
+            normalizedAsset.includes(p) ||
+            normalizedAsset.includes(p.toUpperCase())
+        )
+      ) {
         const isInBounds = price >= min && price <= max;
         if (!isInBounds) {
-          logger.warn(`⚠️ Entry price ${price} for ${asset} (${assetType}) outside expected range [${min}, ${max}]. May indicate parsing error.`);
+          logger.warn(
+            `⚠️ Entry price ${price} for ${asset} (${assetType}) outside expected range [${min}, ${max}]. May indicate parsing error.`
+          );
         }
         return isInBounds;
       }
@@ -1174,12 +1262,19 @@ export class CombinedPredictionsService {
     // If no specific bounds found, do basic sanity check
     // Crypto and small-value assets should be < 1000000
     // Large indices should be > 100
-    if (normalizedType === 'crypto' && price > 1000000) {
-      logger.warn(`⚠️ Crypto price ${price} seems unusually high for asset ${asset}`);
+    if (normalizedType === "crypto" && price > 1000000) {
+      logger.warn(
+        `⚠️ Crypto price ${price} seems unusually high for asset ${asset}`
+      );
       return false;
     }
-    if ((normalizedType === 'index' || normalizedType === 'forex') && price < 10) {
-      logger.warn(`⚠️ Index/Forex price ${price} seems too low for asset ${asset}`);
+    if (
+      (normalizedType === "index" || normalizedType === "forex") &&
+      price < 10
+    ) {
+      logger.warn(
+        `⚠️ Index/Forex price ${price} seems too low for asset ${asset}`
+      );
       return false;
     }
 

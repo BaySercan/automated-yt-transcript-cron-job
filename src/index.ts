@@ -44,7 +44,7 @@ class FinfluencerTracker {
       await reportingService.save();
 
       logger.info("🚀 Starting Finfluencer Tracker Cron Job", {
-        version: "2.0.4",
+        version: "2.0.5",
         environment: config.timezone,
         model: config.openrouterModel,
       });
@@ -340,25 +340,29 @@ class FinfluencerTracker {
     try {
       logger.info("🔍 Analyzing unprocessed transcripts...");
 
-      const BATCH_SIZE = 50;  // Process in batches of 50
+      const BATCH_SIZE = 50; // Process in batches of 50
       let offset = 0;
       let totalAnalyzed = 0;
       let hasMoreRecords = true;
 
       while (hasMoreRecords) {
         // Query for records with transcripts but no analysis (subject_outcome is NULL or ai_model is NULL)
-        const { data: unprocessedRecords, error: queryError } = await supabaseService.getClient()
-          .from("finfluencer_predictions")
-          .select("*")
-          .is("subject_outcome", null)
-          .or("ai_model.is.null", { referencedTable: "finfluencer_predictions" })
-          .not("raw_transcript", "is", null)
-          .order("created_at", { ascending: true })
-          .range(offset, offset + BATCH_SIZE - 1);  // Pagination instead of limit
+        const { data: unprocessedRecords, error: queryError } =
+          await supabaseService
+            .getClient()
+            .from("finfluencer_predictions")
+            .select("*")
+            .is("subject_outcome", null)
+            .or("ai_model.is.null")
+            .not("raw_transcript", "is", null)
+            .order("created_at", { ascending: true })
+            .range(offset, offset + BATCH_SIZE - 1); // Pagination instead of limit
 
         if (queryError) {
-          logger.error("Failed to query unprocessed transcripts", { error: queryError });
-          break;  // Exit loop on error
+          logger.error("Failed to query unprocessed transcripts", {
+            error: queryError,
+          });
+          break; // Exit loop on error
         }
 
         if (!unprocessedRecords || unprocessedRecords.length === 0) {
@@ -368,11 +372,14 @@ class FinfluencerTracker {
         }
 
         const batchNumber = Math.floor(offset / BATCH_SIZE) + 1;
-        logger.info(`📝 Processing batch ${batchNumber}: Found ${unprocessedRecords.length} unprocessed transcripts`, {
-          batchNumber,
-          count: unprocessedRecords.length,
-          offset,
-        });
+        logger.info(
+          `📝 Processing batch ${batchNumber}: Found ${unprocessedRecords.length} unprocessed transcripts`,
+          {
+            batchNumber,
+            count: unprocessedRecords.length,
+            offset,
+          }
+        );
 
         let analyzedCount = 0;
         let failedCount = 0;
@@ -380,14 +387,19 @@ class FinfluencerTracker {
         for (const record of unprocessedRecords) {
           try {
             if (!record.raw_transcript) {
-              logger.warn(`⚠️ Record ${record.id} has no transcript content, skipping`);
+              logger.warn(
+                `⚠️ Record ${record.id} has no transcript content, skipping`
+              );
               continue;
             }
 
-            logger.info(`📊 Analyzing unprocessed transcript: ${record.video_id}`, {
-              videoId: record.video_id,
-              channelId: record.channel_id,
-            });
+            logger.info(
+              `📊 Analyzing unprocessed transcript: ${record.video_id}`,
+              {
+                videoId: record.video_id,
+                channelId: record.channel_id,
+              }
+            );
 
             // Run AI analysis
             const analysis = await globalAIAnalyzer.analyzeTranscript(
@@ -396,13 +408,16 @@ class FinfluencerTracker {
             );
 
             if (!analysis) {
-              logger.warn(`⚠️ No analysis produced for video ${record.video_id}`);
+              logger.warn(
+                `⚠️ No analysis produced for video ${record.video_id}`
+              );
               failedCount++;
               continue;
             }
 
             // Update the record with analysis results
-            const { error: updateError } = await supabaseService.getClient()
+            const { error: updateError } = await supabaseService
+              .getClient()
               .from("finfluencer_predictions")
               .update({
                 subject_outcome: analysis.subject_outcome || "analyzed",
@@ -416,7 +431,9 @@ class FinfluencerTracker {
               .eq("id", record.id);
 
             if (updateError) {
-              logger.error(`Failed to update record ${record.id}`, { error: updateError });
+              logger.error(`Failed to update record ${record.id}`, {
+                error: updateError,
+              });
               failedCount++;
               continue;
             }
@@ -427,7 +444,10 @@ class FinfluencerTracker {
               predictionsFound: (analysis.predictions || []).length,
             });
           } catch (error) {
-            logger.error(`Failed to analyze transcript for ${record.video_id}`, { error });
+            logger.error(
+              `Failed to analyze transcript for ${record.video_id}`,
+              { error }
+            );
             failedCount++;
             continue;
           }
@@ -447,7 +467,7 @@ class FinfluencerTracker {
 
         // Move to next batch
         offset += BATCH_SIZE;
-        
+
         // If batch wasn't full, we've processed all records
         if (unprocessedRecords.length < BATCH_SIZE) {
           hasMoreRecords = false;
@@ -455,7 +475,7 @@ class FinfluencerTracker {
 
         // Add delay between batches to avoid rate limiting
         if (hasMoreRecords) {
-          await new Promise(resolve => setTimeout(resolve, 2000));  // 2 second delay
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 second delay
         }
       }
 
@@ -498,7 +518,7 @@ class FinfluencerTracker {
       // After inserting combined predictions, reconcile horizon-passed records (no AI by default)
       try {
         await combinedPredictionsService.reconcilePredictions({
-          limit: 500,
+          limit: 10000, // Increased from 500 to process more predictions
           dryRun: false,
           retryCount: 3,
           useAI: false,
