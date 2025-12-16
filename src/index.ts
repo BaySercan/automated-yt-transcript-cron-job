@@ -237,7 +237,7 @@ class FinfluencerTracker {
       if (this.isShuttingDown) break;
       try {
         const details = await youtubeService.getChannelDetails(
-          channel.channel_id
+          channel.channel_id.trim()
         );
 
         // Check for channel name change
@@ -278,6 +278,7 @@ class FinfluencerTracker {
       }
 
       try {
+        channel.channel_id = channel.channel_id.trim();
         await this.processChannel(channel);
         this.stats.processed_channels++;
         reportingService.incrementChannelsProcessed();

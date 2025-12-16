@@ -258,7 +258,7 @@ class ReportingService {
           .insert({
             run_id: this.report.run_id,
             started_at: this.report.started_at,
-            finished_at: this.report.finished_at, // Might be null/empty if running
+            finished_at: this.report.finished_at || null, // Handle empty string or null
             duration_ms: this.report.duration_ms,
             status: this.report.status,
             report: this.report,
