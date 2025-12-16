@@ -1,13 +1,13 @@
 export const VERSION = {
   // Semantic Version
-  version: '2.0.5',
+  version: '2.0.6',
   major: 2,
   minor: 0,
-  patch: 5,
+  patch: 6,
   
   // Build Information
-  buildDate: '2025-12-15T17:33:36.556Z',
-  buildNumber: 63901416816,
+  buildDate: '2025-12-16T17:08:49.155Z',
+  buildNumber: 63901501729,
   
   // Git Information (populated by CI/CD)
   gitHash: process.env.GIT_COMMIT || 'unknown',
