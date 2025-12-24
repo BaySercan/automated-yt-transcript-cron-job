@@ -30,7 +30,7 @@ param(
     [switch]$SkipPublish,
     
     [Parameter(HelpMessage="Number of versions to keep (default: 5)")]
-    [int]$KeepVersions = 5,
+    [int]$KeepVersions = 2,
     
     [Parameter(HelpMessage="Show help message")]
     [switch]$Help
