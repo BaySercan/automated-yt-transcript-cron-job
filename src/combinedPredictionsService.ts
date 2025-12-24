@@ -607,6 +607,7 @@ export class CombinedPredictionsService {
               let assetType = p.asset_type;
               let currency = "USD"; // default
               let currencySymbol = "$"; // default symbol
+              let tradingviewSymbol: string | null = null; // New field
 
               if (!assetType) {
                 try {
@@ -618,6 +619,7 @@ export class CombinedPredictionsService {
                   assetType = classification.assetType;
                   currency = classification.currency;
                   currencySymbol = classification.currencySymbol;
+                  tradingviewSymbol = classification.tradingviewSymbol || null;
 
                   this.log("info", `Classified asset ${asset}`, {
                     assetType,
@@ -638,6 +640,11 @@ export class CombinedPredictionsService {
                   currency = priceService.detectCurrency(ticker, assetType);
                   currencySymbol = priceService.getCurrencySymbol(currency);
                 }
+              }
+
+              // Fallback: If AI didn't return a TV symbol (or failed), try algorithmic mapping
+              if (!tradingviewSymbol) {
+                tradingviewSymbol = priceService.mapToTradingViewSymbol(ticker);
               }
 
               // Fetch historical price if enabled
@@ -888,6 +895,7 @@ export class CombinedPredictionsService {
                 status: "pending",
                 platform: "YouTube",
                 ai_model_extraction: rec.ai_model || null,
+                tradingview_symbol: tradingviewSymbol, // Persist TV symbol
               };
 
               if (!dryRun) {
@@ -1199,86 +1207,56 @@ export class CombinedPredictionsService {
    * Validate entry price is within reasonable bounds for the asset type
    * Detects obviously wrong prices (e.g., SPX showing 35 instead of 6500)
    */
-  private isValidEntryPrice(
+  private async isValidEntryPrice(
     price: number | null,
     assetType: string,
     asset: string
-  ): boolean {
+  ): Promise<boolean> {
     if (price === null || price === undefined || price <= 0) {
       return false;
     }
 
-    // Define reasonable price bounds per asset type and specific assets
-    // These are conservative ranges to catch obvious parsing errors
-    const bounds: { [key: string]: [number, number] } = {
-      // Indices: reasonable ranges (in index points)
-      "SPX|S&P 500|^GSPC": [5000, 8500],
-      "NDX|NASDAQ|^IXIC": [15000, 35000],
-      BIST100: [8000, 11000],
-      DAX: [16000, 20000],
-      FTSE: [7000, 8500],
+    try {
+      // Dynamic Check: Compare with last known valid price
+      const lastKnownPrice = await priceService.getLastKnownPrice(asset);
 
-      // Crypto: reasonable ranges (in USD)
-      "BTC|BITCOIN": [20000, 200000],
-      "ETH|ETHEREUM": [1000, 20000],
-      SOL: [100, 500],
-
-      // Commodities: reasonable ranges (in USD per unit)
-      "GOLD|XAU": [1500, 2500],
-      "SILVER|XAG": [25, 50],
-      "OIL|CRUDE": [50, 150],
-
-      // FX pairs: reasonable ranges (in quote currency units)
-      USD: [0.001, 200], // Generic USD pair
-      EUR: [1, 2],
-      GBP: [1, 2],
-      JPY: [0.005, 0.02],
-      TRY: [30, 50],
-    };
-
-    const normalizedAsset = (asset || "").toUpperCase();
-    const normalizedType = (assetType || "").toLowerCase();
-
-    // Find matching bound
-    for (const [key, [min, max]] of Object.entries(bounds)) {
-      const patterns = key.split("|");
-      if (
-        patterns.some(
-          (p) =>
-            normalizedAsset.includes(p) ||
-            normalizedAsset.includes(p.toUpperCase())
-        )
-      ) {
-        const isInBounds = price >= min && price <= max;
-        if (!isInBounds) {
-          logger.warn(
-            `⚠️ Entry price ${price} for ${asset} (${assetType}) outside expected range [${min}, ${max}]. May indicate parsing error.`
-          );
-        }
-        return isInBounds;
+      // COLD START: If we have no history, we MUST trust the new price
+      // This solves the issue where new assets (like XAUTRYG) were rejected by hardcoded ranges
+      if (!lastKnownPrice) {
+        this.log(
+          "info",
+          `First time seeing price for ${asset}. Trusting API.`,
+          {
+            asset,
+            price,
+          }
+        );
+        return true;
       }
-    }
 
-    // If no specific bounds found, do basic sanity check
-    // Crypto and small-value assets should be < 1000000
-    // Large indices should be > 100
-    if (normalizedType === "crypto" && price > 1000000) {
-      logger.warn(
-        `⚠️ Crypto price ${price} seems unusually high for asset ${asset}`
-      );
-      return false;
-    }
-    if (
-      (normalizedType === "index" || normalizedType === "forex") &&
-      price < 10
-    ) {
-      logger.warn(
-        `⚠️ Index/Forex price ${price} seems too low for asset ${asset}`
-      );
-      return false;
-    }
+      // DEVIATION CHECK: If we have history, ensure we didn't jump > 50%
+      const deviation = Math.abs((price - lastKnownPrice) / lastKnownPrice);
+      const MAX_DEVIATION = 0.5; // 50% allowed jump (handles high volatility)
 
-    return true;
+      if (deviation > MAX_DEVIATION) {
+        this.log(
+          "warn",
+          `⚠️ Price deviation too high for ${asset}. Last: ${lastKnownPrice}, New: ${price} (${(
+            deviation * 100
+          ).toFixed(0)}% change)`,
+          { asset, price, lastKnownPrice }
+        );
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      // On error (DB fail), default to safe open (trust price) but warn
+      this.log("warn", "Price validation error, trusting new price", {
+        err: this.safeErrorMessage(error),
+      });
+      return true;
+    }
   }
 }
 

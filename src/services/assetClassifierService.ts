@@ -12,6 +12,8 @@ export interface AssetClassification {
   currencySymbol: string; // Display symbol: €, ₺, £, ¥, ₹, $, ₿, etc. Empty string for indices
   confidence: "high" | "medium" | "low";
   reasoning?: string;
+  tradingviewSymbol?: string; // e.g. "NASDAQ:AAPL", "BIST:THYAO", "BINANCE:BTCUSDT"
+  exchange?: string; // e.g. "NASDAQ", "BIST", "BINANCE"
 }
 
 /**
@@ -365,7 +367,8 @@ INSTRUCTIONS:
    - For INDICES: Return empty string "" (indices show numbers only, no currency symbol)
    - For other assets: Return appropriate symbol for that asset's currency (€ for EUR, ₺ for TRY, £ for GBP, $ for USD, etc.)
 5. Provide confidence level: high, medium, or low
-6. Include reasoning (brief explanation of your classification)
+7. Identify the TradingView symbol (e.g., "NASDAQ:AAPL", "BIST:THYAO", "BINANCE:BTCUSDT")
+8. Identify the Exchange Code (e.g., "NASDAQ", "BIST", "BINANCE", "FX", "TVC")
 
 ASSET TYPE GUIDELINES:
 - Stocks: Individual company shares (AAPL, TSLA, MSFT, ASELS, TOASO, SODA, KRDMD, etc.)
@@ -404,15 +407,15 @@ CRITICAL FOR DISPLAY FORMATTING:
 - All other assets must have a symbol: "$", "€", "₺", "£", "¥", "₹", "₿", etc.
 
 EXAMPLES:
-- "Apple" → {assetType: "stock", currency: "USD", normalizedSymbol: "AAPL", currencySymbol: "$"}
-- "BIST 100" or "BIST100" → {assetType: "index", currency: "TRY", normalizedSymbol: "BIST100", currencySymbol: ""}
-- "USD/TRY" → {assetType: "forex", currency: "USD", normalizedSymbol: "USDTRY", currencySymbol: "$"}
-- "EUR/USD" → {assetType: "forex", currency: "EUR", normalizedSymbol: "EURUSD", currencySymbol: "€"}
-- "Gold" or "XAU" → {assetType: "commodity", currency: "USD", normalizedSymbol: "GOLD", currencySymbol: "$"}
-- "Bitcoin" → {assetType: "crypto", currency: "USD", normalizedSymbol: "BTC", currencySymbol: "₿"}
-- "ASELS" (Turkish stock) → {assetType: "stock", currency: "TRY", normalizedSymbol: "ASELS", currencySymbol: "₺"}
-- "FTSE 100" → {assetType: "index", currency: "GBP", normalizedSymbol: "FTSE", currencySymbol: ""}
-- "DAX" → {assetType: "index", currency: "EUR", normalizedSymbol: "DAX", currencySymbol: ""}
+- "Apple" → {assetType: "stock", currency: "USD", normalizedSymbol: "AAPL", currencySymbol: "$", tradingviewSymbol: "NASDAQ:AAPL", exchange: "NASDAQ"}
+- "BIST 100" or "BIST100" → {assetType: "index", currency: "TRY", normalizedSymbol: "BIST100", currencySymbol: "", tradingviewSymbol: "BIST:XU100", exchange: "BIST"}
+- "USD/TRY" → {assetType: "forex", currency: "USD", normalizedSymbol: "USDTRY", currencySymbol: "$", tradingviewSymbol: "FX:USDTRY", exchange: "FX"}
+- "EUR/USD" → {assetType: "forex", currency: "EUR", normalizedSymbol: "EURUSD", currencySymbol: "€", tradingviewSymbol: "FX:EURUSD", exchange: "FX"}
+- "Gold" or "XAU" → {assetType: "commodity", currency: "USD", normalizedSymbol: "GOLD", currencySymbol: "$", tradingviewSymbol: "TVC:GOLD", exchange: "TVC"}
+- "Bitcoin" → {assetType: "crypto", currency: "USD", normalizedSymbol: "BTC", currencySymbol: "₿", tradingviewSymbol: "BINANCE:BTCUSDT", exchange: "BINANCE"}
+- "ASELS" (Turkish stock) → {assetType: "stock", currency: "TRY", normalizedSymbol: "ASELS", currencySymbol: "₺", tradingviewSymbol: "BIST:ASELS", exchange: "BIST"}
+- "FTSE 100" → {assetType: "index", currency: "GBP", normalizedSymbol: "FTSE", currencySymbol: "", tradingviewSymbol: "TVC:UKX", exchange: "TVC"}
+- "DAX" → {assetType: "index", currency: "EUR", normalizedSymbol: "DAX", currencySymbol: "", tradingviewSymbol: "XETR:DAX", exchange: "XETR"}
 
 Return ONLY valid JSON in this exact format:
 {
@@ -421,7 +424,9 @@ Return ONLY valid JSON in this exact format:
   "normalizedSymbol": "NORMALIZED_SYMBOL",
   "currencySymbol": "SYMBOL_OR_EMPTY_FOR_INDICES",
   "confidence": "high|medium|low",
-  "reasoning": "brief explanation of classification"
+  "reasoning": "brief explanation of classification",
+  "tradingviewSymbol": "EXCHANGE:SYMBOL",
+  "exchange": "EXCHANGE_CODE"
 }`;
 
     const models = [config.openrouterModel, config.openrouterModel2].filter(

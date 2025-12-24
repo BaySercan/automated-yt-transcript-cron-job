@@ -32,6 +32,10 @@ export class PriceService {
     silver: "SI=F",
     crude: "CL=F",
     oil: "CL=F",
+    brent: "BZ=F", // Added Brent
+    natgas: "NG=F", // Added Natural Gas
+    corn: "ZC=F", // Added Corn
+    coffee: "KC=F", // Added Coffee
     "natural gas": "NG=F",
     xau: "GC=F",
     xag: "SI=F",
@@ -258,6 +262,30 @@ export class PriceService {
   }
 
   /**
+   * Get the last known price for an asset from the persistent cache
+   * Used for dynamic validation (checking deviation)
+   */
+  async getLastKnownPrice(asset: string): Promise<number | null> {
+    try {
+      const { data, error } = await supabaseService.supabase
+        .from("asset_prices")
+        .select("price")
+        .ilike("asset", asset)
+        .order("date", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (error || !data) {
+        return null;
+      }
+
+      return data.price;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
    * Check if price already exists in combined_predictions table
    * Returns cached price to avoid redundant API calls
    */
@@ -305,7 +333,8 @@ export class PriceService {
    */
   private async checkAssetPriceTable(
     asset: string,
-    date: Date
+    date: Date,
+    assetType: string = "unknown"
   ): Promise<number | null> {
     try {
       const formattedDate = date.toISOString().split("T")[0];
@@ -315,6 +344,9 @@ export class PriceService {
         .select("price")
         .ilike("asset", asset)
         .eq("date", formattedDate)
+        // Ideally we check asset_type too, but for backward compatibility we match mainly on asset+date
+        // If we have assetType, we try to match it or match nulls
+        // .eq("asset_type", assetType) <--- complex if nulls exist
         .limit(1)
         .single();
 
@@ -335,7 +367,8 @@ export class PriceService {
     date: Date,
     price: number,
     currency: string = "USD",
-    source: string = "unknown"
+    source: string = "unknown",
+    assetType: string = "unknown"
   ) {
     try {
       const formattedDate = date.toISOString().split("T")[0];
@@ -349,6 +382,7 @@ export class PriceService {
           price: price,
           currency: currency,
           source: source,
+          asset_type: assetType, // Added asset_type
           created_at: new Date().toISOString(),
         },
         { onConflict: "asset, date" }
@@ -367,20 +401,23 @@ export class PriceService {
     asset: string,
     priceMap: Map<string, number>,
     currency: string = "USD",
-    source: string = "unknown"
+    source: string = "unknown",
+    assetType: string = "unknown"
   ) {
     if (priceMap.size === 0) return;
 
     const rows = [];
     const normalizedAsset = this.normalizeAssetName(asset);
 
-    for (const [dateStr, price] of priceMap.entries()) {
+    // Use Array.from to ensure iteration safety across environments
+    for (const [dateStr, price] of Array.from(priceMap.entries())) {
       rows.push({
         asset: normalizedAsset,
         date: dateStr,
         price: price,
         currency: currency,
         source: source,
+        asset_type: assetType, // Added asset_type
         created_at: new Date().toISOString(),
       });
     }
@@ -484,7 +521,8 @@ export class PriceService {
             date,
             rate,
             "rate",
-            "yahoo_finance"
+            "yahoo_finance",
+            "forex" // AssetType
           );
 
           return { rate, source: "api", date_found: formattedDate };
@@ -601,7 +639,11 @@ export class PriceService {
       }
 
       // 0b. Check dedicated asset_prices table (Primary Persistent Cache)
-      const persistentPrice = await this.checkAssetPriceTable(asset, date);
+      const persistentPrice = await this.checkAssetPriceTable(
+        asset,
+        date,
+        assetType // Pass assetType to checker
+      );
       if (persistentPrice !== null) {
         logger.info(
           `Using persistent price from asset_prices for ${asset} on ${formattedDate}: ${persistentPrice}`
@@ -626,7 +668,8 @@ export class PriceService {
           date,
           cachedPrice,
           this.detectCurrency(asset),
-          "legacy_backfill"
+          "legacy_backfill",
+          assetType // Pass assetType
         );
         reportingService.incrementPriceCacheHit();
         reportingService.incrementPriceSuccess();
@@ -669,7 +712,8 @@ export class PriceService {
             date,
             cmcPrice,
             "USD",
-            "coinmarketcap"
+            "coinmarketcap",
+            "crypto" // Hardcode crypto type
           );
           return cmcPrice;
         }
@@ -689,7 +733,8 @@ export class PriceService {
             date,
             coinGeckoPrice,
             "USD",
-            "coingecko"
+            "coingecko",
+            "crypto" // Hardcode crypto type
           );
           return coinGeckoPrice;
         }
@@ -715,7 +760,8 @@ export class PriceService {
               date,
               goldPrice,
               "USD",
-              "usagold"
+              "usagold",
+              "commodity"
             );
             return goldPrice;
           }
@@ -738,7 +784,8 @@ export class PriceService {
               date,
               tdPrice,
               "TRY",
-              "twelvedata"
+              "twelvedata",
+              "commodity"
             );
             return tdPrice;
           }
@@ -762,7 +809,8 @@ export class PriceService {
               date,
               silverPrice,
               "USD",
-              "usagold"
+              "usagold",
+              "commodity"
             );
             return silverPrice;
           }
@@ -781,7 +829,8 @@ export class PriceService {
             date,
             tdHistPrice,
             "TRY",
-            "twelvedata"
+            "twelvedata",
+            "commodity"
           );
           return tdHistPrice;
         }
@@ -793,12 +842,23 @@ export class PriceService {
       );
       try {
         // First try to resolve the symbol using our helper
-        let yahooSymbol = await this.resolveYahooTicker(asset);
+        let yahooSymbol = await this.resolveYahooTicker(asset, assetType);
 
         // If helper fails or returns generic, try the Yahoo Search API via yahooService
         if (!yahooSymbol || yahooSymbol === asset) {
           const searched = await yahooService.search(asset);
-          if (searched) yahooSymbol = searched;
+          if (searched) {
+            yahooSymbol = searched.symbol;
+            // Compute fallback TV symbol using the exchange metadata
+            const fallbackTvSymbol = this.mapToTradingViewSymbol(
+              yahooSymbol,
+              searched.exchange
+            );
+            logger.info(
+              `Top-up TV Symbol via fallback: ${fallbackTvSymbol} (Exchange: ${searched.exchange})`
+            );
+            // TODO: Persist fallbackTvSymbol to asset_prices or combined_predictions if schema allows
+          }
         }
 
         logger.info(`Resolved Yahoo symbol for ${asset}: ${yahooSymbol}`);
@@ -826,7 +886,8 @@ export class PriceService {
             asset,
             priceMap,
             currency,
-            "yahoo"
+            "yahoo",
+            assetType // Pass assetType to batch save
           );
 
           // Return specific requested date if found
@@ -866,7 +927,7 @@ export class PriceService {
           `Falling back to Stooq for ${asset} on ${formattedDate}...`
         );
         try {
-          let yahooSymbol = await this.resolveYahooTicker(asset);
+          let yahooSymbol = await this.resolveYahooTicker(asset, assetType);
           if (!yahooSymbol || yahooSymbol === asset) {
             yahooSymbol = asset;
           }
@@ -886,7 +947,8 @@ export class PriceService {
               date,
               stooqResult.close,
               this.detectCurrency(yahooSymbol),
-              "stooq"
+              "stooq",
+              assetType // Pass assetType
             );
             this.requestCache.set(cacheKey, stooqResult.close);
             return stooqResult.close;
@@ -967,7 +1029,14 @@ export class PriceService {
   /**
    * Resolve asset name to Yahoo Finance ticker
    */
-  private async resolveYahooTicker(query: string): Promise<string> {
+  /**
+   * Resolve asset name to Yahoo Finance ticker
+   * Now accepts assetType to filter or prioritize mapping
+   */
+  private async resolveYahooTicker(
+    query: string,
+    assetType?: string
+  ): Promise<string> {
     const key = query.toLowerCase().replace(/\s+/g, "");
 
     // Check special mapping
@@ -975,7 +1044,67 @@ export class PriceService {
       return this.SPECIAL_SYMBOLS[key];
     }
 
+    // Type-aware strict mappings
+    if (assetType) {
+      const type = assetType.toLowerCase();
+      // If commodity and query is WTI, ensure we map to CL=F
+      if (type === "commodity") {
+        if (key === "wti") return "CL=F";
+        if (key === "brent") return "BZ=F";
+        if (key === "natgas") return "NG=F";
+      }
+      // If crypto and query is generic, try adding -USD
+      if (type === "crypto") {
+        if (!query.includes("-") && !query.includes("USD")) {
+          return `${query.toUpperCase()}-USD`;
+        }
+      }
+    }
+
     return query;
+  }
+
+  /**
+   * Helper to map Yahoo/Generic symbols to TradingView format
+   * @param symbol Yahoo symbol (e.g. "GARAN.IS", "CL=F")
+   * @param exchange Yahoo exchange code (e.g. "IST", "NYM")
+   */
+  public mapToTradingViewSymbol(symbol: string, exchange?: string): string {
+    // 1. Handle Commodities (Futures)
+    if (symbol.endsWith("=F")) {
+      const root = symbol.replace("=F", "");
+      if (root === "CL") return "NYMEX:CL1!"; // Crude Oil
+      if (root === "GC") return "COMEX:GC1!"; // Gold
+      if (root === "SI") return "COMEX:SI1!"; // Silver
+      if (root === "NG") return "NYMEX:NG1!"; // Natural Gas
+      if (root === "BZ") return "TVC:UKOIL"; // Brent
+      return `TVC:${root}`; // Generic TVC
+    }
+
+    // 2. Handle Exchange Specifics
+    if (exchange) {
+      // Istanbul (BIST)
+      if (exchange === "IST") return `BIST:${symbol.split(".")[0]}`;
+      // US Exchanges
+      if (exchange === "NYQ" || exchange === "NMS" || exchange === "NGM")
+        return `NASDAQ:${symbol}`;
+      if (exchange === "NY" || exchange === "NYS") return `NYSE:${symbol}`;
+      // Crypto
+      if (exchange === "CCC")
+        return `BINANCE:${symbol.replace("-USD", "USDT")}`;
+    }
+
+    // 3. Handle Indices (Generic Yahoo mappings)
+    if (symbol.startsWith("^")) {
+      const root = symbol.replace("^", "");
+      if (root === "GSPC") return "SP:SPX";
+      if (root === "DJI") return "DJ:DJI";
+      if (root === "IXIC") return "NASDAQ:IXIC";
+      if (root === "XU100") return "BIST:XU100";
+    }
+
+    // 4. Default clean up
+    return symbol.toUpperCase();
   }
 
   /**
@@ -1488,53 +1617,24 @@ export class PriceService {
     // Iterate through days in range (daily resolution)
     // Optimization: If range is huge, maybe check weekly? But daily is safer for targets.
     // Limit: Don't check more than 365 days to avoid API abuse
-    const MAX_DAYS = 60;
-    const oneDay = 24 * 60 * 60 * 1000;
-    const diffDays = Math.round(
-      Math.abs((checkEnd.getTime() - checkStart.getTime()) / oneDay)
-    );
-
-    if (diffDays > MAX_DAYS) {
-      logger.warn(
-        `Verification range too large (${diffDays} days) for ${asset}. Checking only start and end.`
-      );
-      // Fallback: Check start and end only
-      const startPrice = await this.searchPrice(asset, checkStart, assetType);
-      if (
-        startPrice &&
-        this.checkHit(entryPrice, startPrice, targetPrice, sentiment, assetType)
-      ) {
-        return {
-          status: "correct",
-          metDate: checkStart,
-          actualPrice: startPrice,
-        };
-      }
-      const endPrice = await this.searchPrice(asset, checkEnd, assetType);
-      if (
-        endPrice &&
-        this.checkHit(entryPrice, endPrice, targetPrice, sentiment, assetType)
-      ) {
-        return { status: "correct", metDate: checkEnd, actualPrice: endPrice };
-      }
-    } else {
-      // Daily check
-      for (
-        let d = new Date(checkStart);
-        d <= checkEnd;
-        d.setDate(d.getDate() + 1)
-      ) {
-        const price = await this.searchPrice(asset, d, assetType);
-        if (price !== null) {
-          if (
-            this.checkHit(entryPrice, price, targetPrice, sentiment, assetType)
-          ) {
-            return {
-              status: "correct",
-              metDate: new Date(d),
-              actualPrice: price,
-            };
-          }
+    // NO MAX DAYS LIMIT - CHECK DAILY FOR EVERY PREDICTION
+    // This removes the "60-Day Blind Spot"
+    // Daily check
+    for (
+      let d = new Date(checkStart);
+      d <= checkEnd;
+      d.setDate(d.getDate() + 1)
+    ) {
+      const price = await this.searchPrice(asset, d, assetType);
+      if (price !== null) {
+        if (
+          this.checkHit(entryPrice, price, targetPrice, sentiment, assetType)
+        ) {
+          return {
+            status: "correct",
+            metDate: new Date(d),
+            actualPrice: price,
+          };
         }
       }
     }
@@ -1587,7 +1687,7 @@ export class PriceService {
       // Define thresholds based on asset type
       if (type === "crypto") {
         thresholdUp = 0.1; // +10%
-        thresholdDown = 0.05; // -5%
+        thresholdDown = 0.1; // -10% (Tightened from -5%)
       } else if (type === "stock") {
         thresholdUp = 0.05; // +5%
         thresholdDown = 0.05; // -5%
