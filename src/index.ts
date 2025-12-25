@@ -15,6 +15,7 @@ import {
 } from "./utils";
 import { CronJobStats } from "./types";
 import { reportingService } from "./services/reportingService";
+import { newsService } from "./services/newsService";
 import { ConfigurationError } from "./errors";
 
 class FinfluencerTracker {
@@ -66,6 +67,9 @@ class FinfluencerTracker {
 
       // Process combined predictions (AI enrichment + price data)
       await this.processCombinedPredictions();
+
+      // Process News (Fetch, Scrape, Analyze)
+      await newsService.processNews();
 
       // Finalize and display report
       reportingService.finalize("success");
