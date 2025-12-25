@@ -263,8 +263,8 @@ Content Excerpt: "${content.slice(0, 3000)}"
 
 TASK:
 1. Determine if this is related to financial markets, economy, crypto, stocks, or geopolitics affecting markets.
-2. If YES, generate a short punchy summary (max 2 sentences).
-3. Assign a category from: "monetary-policy", "earnings", "crypto", "geopolitics", "markets", "economy".
+2. If YES, generate a short punchy summary (max 5 sentences).
+3. Assign a category from: "monetary-policy", "earnings", "crypto", "geopolitics", "markets", "economy", etc.
 4. Analyze market impact for: overall, stocks, crypto, forex, commodities.
    Ratings: "very-positive", "positive", "neutral", "negative", "very-negative".
 
