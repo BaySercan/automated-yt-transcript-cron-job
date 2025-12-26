@@ -614,16 +614,30 @@ export class PriceService {
   /**
    * Search for the price of an asset on a specific date
    * Uses cache first, then CoinMarketCap for current crypto, CoinGecko for historical crypto, and Yahoo Finance for others
+   * If tvSymbol is provided, use it to determine the best price source
    */
   async searchPrice(
     asset: string,
     date: Date,
-    assetType?: string
+    assetType?: string,
+    tvSymbol?: string
   ): Promise<number | null> {
     try {
       reportingService.incrementPriceRequest();
       const formattedDate = date.toISOString().split("T")[0];
       const cacheKey = `${asset.toUpperCase()}:${formattedDate}`;
+
+      // If tvSymbol provided, extract useful info for routing
+      let tvExchange: string | null = null;
+      let tvTicker: string | null = null;
+      if (tvSymbol && tvSymbol.includes(":")) {
+        const parts = tvSymbol.split(":");
+        tvExchange = parts[0].toUpperCase();
+        tvTicker = parts[1];
+        logger.info(
+          `TV Symbol routing: ${tvSymbol} → Exchange: ${tvExchange}, Ticker: ${tvTicker}`
+        );
+      }
 
       // 0a. Check request-scoped memory cache
       if (this.requestCache.has(cacheKey)) {

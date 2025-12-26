@@ -575,8 +575,14 @@ export class CombinedPredictionsService {
           for (const p of predictions) {
             try {
               let asset = p.asset || "UNKNOWN";
-              // Normalize asset name immediately
+              // Normalize asset name immediately (basic cleanup)
               asset = priceService.normalizeAssetName(asset);
+
+              // Advanced normalization: Check DB for existing normalized name or ask AI
+              asset = await this.getNormalizedAssetName(
+                asset,
+                p.prediction_text || ""
+              );
 
               const predictionText = p.prediction_text || "";
               const normalizedKey = this.createNormalizedKey(
@@ -600,7 +606,7 @@ export class CombinedPredictionsService {
                 continue;
               }
 
-              // Use raw asset as ticker since we removed AI normalization
+              // Use normalized asset as ticker
               const ticker = asset;
 
               // Infer asset type and currency using AI classifier
@@ -608,6 +614,16 @@ export class CombinedPredictionsService {
               let currency = "USD"; // default
               let currencySymbol = "$"; // default symbol
               let tradingviewSymbol: string | null = null; // New field
+
+              // Check DB first for existing TV symbol (cache)
+              const cachedTvSymbol = await this.getExistingTvSymbol(asset);
+              if (cachedTvSymbol) {
+                tradingviewSymbol = cachedTvSymbol;
+                this.log(
+                  "info",
+                  `Using cached TV symbol for ${asset}: ${cachedTvSymbol}`
+                );
+              }
 
               if (!assetType) {
                 try {
@@ -619,7 +635,11 @@ export class CombinedPredictionsService {
                   assetType = classification.assetType;
                   currency = classification.currency;
                   currencySymbol = classification.currencySymbol;
-                  tradingviewSymbol = classification.tradingviewSymbol || null;
+
+                  // Only use AI's TV symbol if we don't have a cached one
+                  if (!tradingviewSymbol && classification.tradingviewSymbol) {
+                    tradingviewSymbol = classification.tradingviewSymbol;
+                  }
 
                   this.log("info", `Classified asset ${asset}`, {
                     assetType,
@@ -642,7 +662,7 @@ export class CombinedPredictionsService {
                 }
               }
 
-              // Fallback: If AI didn't return a TV symbol (or failed), try algorithmic mapping
+              // Fallback: If we still don't have a TV symbol, try algorithmic mapping
               if (!tradingviewSymbol) {
                 tradingviewSymbol = priceService.mapToTradingViewSymbol(ticker);
               }
@@ -1204,6 +1224,133 @@ export class CombinedPredictionsService {
         error: this.safeErrorMessage(err),
       });
       throw err;
+    }
+  }
+
+  /**
+   * Get existing TV symbol from database for an asset (cache lookup)
+   */
+  private async getExistingTvSymbol(asset: string): Promise<string | null> {
+    try {
+      const { data } = await supabaseService.supabase
+        .from("combined_predictions")
+        .select("tradingview_symbol")
+        .eq("asset", asset)
+        .not("tradingview_symbol", "is", null)
+        .limit(1)
+        .single();
+      return data?.tradingview_symbol || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get normalized asset name - checks DB cache first, then uses AI if needed
+   * Converts company names to tickers (ROBINHOOD → HOOD)
+   */
+  private async getNormalizedAssetName(
+    asset: string,
+    predictionText: string
+  ): Promise<string> {
+    try {
+      // 1. Check if we already have this asset normalized in DB
+      const { data: existing } = await supabaseService.supabase
+        .from("combined_predictions")
+        .select("asset")
+        .eq("asset", asset)
+        .limit(1);
+
+      // If asset exists in DB, it's already normalized (or at least consistent)
+      if (existing && existing.length > 0) {
+        return asset; // Use as-is, already in DB
+      }
+
+      // 2. Check if this is a company name that maps to an existing ticker
+      // e.g., if "ROBINHOOD" comes in but we have "HOOD" in DB
+      const aiNormalized = await this.askAIForNormalizedTicker(
+        asset,
+        predictionText
+      );
+      if (aiNormalized && aiNormalized !== asset) {
+        // Check if the normalized ticker already exists in DB
+        const { data: tickerExists } = await supabaseService.supabase
+          .from("combined_predictions")
+          .select("asset")
+          .eq("asset", aiNormalized)
+          .limit(1);
+
+        if (tickerExists && tickerExists.length > 0) {
+          this.log(
+            "info",
+            `Normalized asset: ${asset} → ${aiNormalized} (exists in DB)`
+          );
+          return aiNormalized;
+        }
+
+        // Use AI's normalized version even if new
+        this.log("info", `Normalized asset: ${asset} → ${aiNormalized} (new)`);
+        return aiNormalized;
+      }
+
+      return asset; // Return original if no normalization needed
+    } catch (err) {
+      this.log(
+        "warn",
+        `Asset normalization failed for ${asset}, using original`,
+        {
+          error: this.safeErrorMessage(err),
+        }
+      );
+      return asset;
+    }
+  }
+
+  /**
+   * Ask AI to normalize an asset name to its proper ticker
+   */
+  private async askAIForNormalizedTicker(
+    asset: string,
+    predictionText: string
+  ): Promise<string | null> {
+    try {
+      const prompt = `Given this asset name, return ONLY the proper stock/crypto ticker symbol.
+
+ASSET: "${asset}"
+CONTEXT: "${predictionText.slice(0, 200)}"
+
+RULES:
+- ROBINHOOD → HOOD
+- TESLA → TSLA  
+- AMAZON → AMZN
+- BITCOIN → BTC
+- If already a proper ticker, return as-is
+- If private company (SPACEX), return as-is uppercase
+- Return ONLY the ticker, nothing else`;
+
+      const response = await axios.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          model: config.openrouterModel2,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0,
+          max_tokens: 20,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${config.openrouterApiKey}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 15000,
+        }
+      );
+
+      const result = response.data?.choices?.[0]?.message?.content
+        ?.trim()
+        .toUpperCase();
+      return result || null;
+    } catch {
+      return null;
     }
   }
 
