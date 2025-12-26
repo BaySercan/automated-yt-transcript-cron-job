@@ -35,6 +35,8 @@ export class AssetClassifierService {
       normalizedSymbol: "BTC",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "BINANCE:BTCUSDT",
+      exchange: "BINANCE",
     },
     ETH: {
       assetType: "crypto",
@@ -42,6 +44,8 @@ export class AssetClassifierService {
       normalizedSymbol: "ETH",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "BINANCE:ETHUSDT",
+      exchange: "BINANCE",
     },
     SOL: {
       assetType: "crypto",
@@ -49,6 +53,8 @@ export class AssetClassifierService {
       normalizedSymbol: "SOL",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "BINANCE:SOLUSDT",
+      exchange: "BINANCE",
     },
     XRP: {
       assetType: "crypto",
@@ -56,6 +62,8 @@ export class AssetClassifierService {
       normalizedSymbol: "XRP",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "BINANCE:XRPUSDT",
+      exchange: "BINANCE",
     },
     ADA: {
       assetType: "crypto",
@@ -63,6 +71,8 @@ export class AssetClassifierService {
       normalizedSymbol: "ADA",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "BINANCE:ADAUSDT",
+      exchange: "BINANCE",
     },
     DOGE: {
       assetType: "crypto",
@@ -70,6 +80,26 @@ export class AssetClassifierService {
       normalizedSymbol: "DOGE",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "BINANCE:DOGEUSDT",
+      exchange: "BINANCE",
+    },
+    AVAX: {
+      assetType: "crypto",
+      currency: "USD",
+      normalizedSymbol: "AVAX",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "BINANCE:AVAXUSDT",
+      exchange: "BINANCE",
+    },
+    LDO: {
+      assetType: "crypto",
+      currency: "USD",
+      normalizedSymbol: "LDO",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "BINANCE:LDOUSDT",
+      exchange: "BINANCE",
     },
 
     // Major Indices (empty symbol for indices)
@@ -79,6 +109,8 @@ export class AssetClassifierService {
       normalizedSymbol: "SPX",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "SP:SPX",
+      exchange: "SP",
     },
     SP500: {
       assetType: "index",
@@ -86,6 +118,17 @@ export class AssetClassifierService {
       normalizedSymbol: "SPX",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "SP:SPX",
+      exchange: "SP",
+    },
+    US500: {
+      assetType: "index",
+      currency: "USD",
+      normalizedSymbol: "SPX",
+      currencySymbol: "",
+      confidence: "high",
+      tradingviewSymbol: "SP:SPX",
+      exchange: "SP",
     },
     NDX: {
       assetType: "index",
@@ -93,6 +136,8 @@ export class AssetClassifierService {
       normalizedSymbol: "NDX",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "NASDAQ:NDX",
+      exchange: "NASDAQ",
     },
     NASDAQ: {
       assetType: "index",
@@ -100,6 +145,8 @@ export class AssetClassifierService {
       normalizedSymbol: "NDX",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "NASDAQ:NDX",
+      exchange: "NASDAQ",
     },
     BIST100: {
       assetType: "index",
@@ -107,6 +154,8 @@ export class AssetClassifierService {
       normalizedSymbol: "BIST100",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "BIST:XU100",
+      exchange: "BIST",
     },
     BIST30: {
       assetType: "index",
@@ -114,6 +163,8 @@ export class AssetClassifierService {
       normalizedSymbol: "BIST30",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "BIST:XU030",
+      exchange: "BIST",
     },
     BIST75: {
       assetType: "index",
@@ -121,6 +172,8 @@ export class AssetClassifierService {
       normalizedSymbol: "BIST75",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "BIST:XU075",
+      exchange: "BIST",
     },
     XU100: {
       assetType: "index",
@@ -128,6 +181,8 @@ export class AssetClassifierService {
       normalizedSymbol: "BIST100",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "BIST:XU100",
+      exchange: "BIST",
     },
     DAX: {
       assetType: "index",
@@ -135,6 +190,8 @@ export class AssetClassifierService {
       normalizedSymbol: "DAX",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "XETR:DAX",
+      exchange: "XETR",
     },
     FTSE: {
       assetType: "index",
@@ -142,6 +199,8 @@ export class AssetClassifierService {
       normalizedSymbol: "FTSE",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "TVC:UKX",
+      exchange: "TVC",
     },
     FTSE100: {
       assetType: "index",
@@ -149,6 +208,8 @@ export class AssetClassifierService {
       normalizedSymbol: "FTSE",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "TVC:UKX",
+      exchange: "TVC",
     },
     NIKKEI: {
       assetType: "index",
@@ -156,6 +217,8 @@ export class AssetClassifierService {
       normalizedSymbol: "N225",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "TVC:NI225",
+      exchange: "TVC",
     },
     N225: {
       assetType: "index",
@@ -163,6 +226,8 @@ export class AssetClassifierService {
       normalizedSymbol: "N225",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "TVC:NI225",
+      exchange: "TVC",
     },
     DOW: {
       assetType: "index",
@@ -170,6 +235,26 @@ export class AssetClassifierService {
       normalizedSymbol: "DJI",
       currencySymbol: "",
       confidence: "high",
+      tradingviewSymbol: "TVC:DJI",
+      exchange: "TVC",
+    },
+    DJI: {
+      assetType: "index",
+      currency: "USD",
+      normalizedSymbol: "DJI",
+      currencySymbol: "",
+      confidence: "high",
+      tradingviewSymbol: "TVC:DJI",
+      exchange: "TVC",
+    },
+    DXY: {
+      assetType: "index",
+      currency: "USD",
+      normalizedSymbol: "DXY",
+      currencySymbol: "",
+      confidence: "high",
+      tradingviewSymbol: "TVC:DXY",
+      exchange: "TVC",
     },
 
     // Major Forex
@@ -179,6 +264,8 @@ export class AssetClassifierService {
       normalizedSymbol: "EURUSD",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "FX:EURUSD",
+      exchange: "FX",
     },
     USDTRY: {
       assetType: "forex",
@@ -186,6 +273,8 @@ export class AssetClassifierService {
       normalizedSymbol: "USDTRY",
       currencySymbol: "₺",
       confidence: "high",
+      tradingviewSymbol: "FX:USDTRY",
+      exchange: "FX",
     },
     GBPUSD: {
       assetType: "forex",
@@ -193,6 +282,8 @@ export class AssetClassifierService {
       normalizedSymbol: "GBPUSD",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "FX:GBPUSD",
+      exchange: "FX",
     },
     USDJPY: {
       assetType: "forex",
@@ -200,20 +291,26 @@ export class AssetClassifierService {
       normalizedSymbol: "USDJPY",
       currencySymbol: "¥",
       confidence: "high",
+      tradingviewSymbol: "FX:USDJPY",
+      exchange: "FX",
     },
     EURTRY: {
       assetType: "forex",
-      currency: "EUR",
+      currency: "TRY",
       normalizedSymbol: "EURTRY",
-      currencySymbol: "€",
+      currencySymbol: "₺",
       confidence: "high",
+      tradingviewSymbol: "FX:EURTRY",
+      exchange: "FX",
     },
     GBPTRY: {
       assetType: "forex",
-      currency: "GBP",
+      currency: "TRY",
       normalizedSymbol: "GBPTRY",
-      currencySymbol: "£",
+      currencySymbol: "₺",
       confidence: "high",
+      tradingviewSymbol: "FX:GBPTRY",
+      exchange: "FX",
     },
 
     // Major Commodities
@@ -223,6 +320,8 @@ export class AssetClassifierService {
       normalizedSymbol: "GOLD",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "TVC:GOLD",
+      exchange: "TVC",
     },
     XAUUSD: {
       assetType: "commodity",
@@ -230,6 +329,8 @@ export class AssetClassifierService {
       normalizedSymbol: "XAUUSD",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "TVC:GOLD",
+      exchange: "TVC",
     },
     XAU: {
       assetType: "commodity",
@@ -237,6 +338,8 @@ export class AssetClassifierService {
       normalizedSymbol: "XAUUSD",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "TVC:GOLD",
+      exchange: "TVC",
     },
     XAUTRYG: {
       assetType: "commodity",
@@ -244,6 +347,8 @@ export class AssetClassifierService {
       normalizedSymbol: "XAUTRYG",
       currencySymbol: "₺",
       confidence: "high",
+      tradingviewSymbol: "FX_IDC:XAUTRYG",
+      exchange: "FX_IDC",
     },
     SILVER: {
       assetType: "commodity",
@@ -251,6 +356,8 @@ export class AssetClassifierService {
       normalizedSymbol: "SILVER",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "TVC:SILVER",
+      exchange: "TVC",
     },
     CRUDE: {
       assetType: "commodity",
@@ -258,6 +365,8 @@ export class AssetClassifierService {
       normalizedSymbol: "CRUDE",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "TVC:USOIL",
+      exchange: "TVC",
     },
     OIL: {
       assetType: "commodity",
@@ -265,6 +374,109 @@ export class AssetClassifierService {
       normalizedSymbol: "CRUDE",
       currencySymbol: "$",
       confidence: "high",
+      tradingviewSymbol: "TVC:USOIL",
+      exchange: "TVC",
+    },
+    BRENT: {
+      assetType: "commodity",
+      currency: "USD",
+      normalizedSymbol: "BRENT",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "TVC:UKOIL",
+      exchange: "TVC",
+    },
+
+    // Major US Stocks
+    AAPL: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "AAPL",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:AAPL",
+      exchange: "NASDAQ",
+    },
+    MSFT: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "MSFT",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:MSFT",
+      exchange: "NASDAQ",
+    },
+    GOOGL: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "GOOGL",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:GOOGL",
+      exchange: "NASDAQ",
+    },
+    AMZN: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "AMZN",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:AMZN",
+      exchange: "NASDAQ",
+    },
+    META: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "META",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:META",
+      exchange: "NASDAQ",
+    },
+    NVDA: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "NVDA",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:NVDA",
+      exchange: "NASDAQ",
+    },
+    TSLA: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "TSLA",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:TSLA",
+      exchange: "NASDAQ",
+    },
+    AMD: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "AMD",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:AMD",
+      exchange: "NASDAQ",
+    },
+    INTC: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "INTC",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:INTC",
+      exchange: "NASDAQ",
+    },
+    ARM: {
+      assetType: "stock",
+      currency: "USD",
+      normalizedSymbol: "ARM",
+      currencySymbol: "$",
+      confidence: "high",
+      tradingviewSymbol: "NASDAQ:ARM",
+      exchange: "NASDAQ",
     },
   };
 
@@ -493,6 +705,21 @@ Return ONLY valid JSON in this exact format:
           result.currencySymbol = "";
         }
 
+        // Validate and fix tradingviewSymbol format (must be EXCHANGE:SYMBOL)
+        if (
+          result.tradingviewSymbol &&
+          !result.tradingviewSymbol.includes(":")
+        ) {
+          // AI returned just the symbol without exchange prefix - try to fix it
+          const exchange =
+            result.exchange ||
+            this.inferExchange(result.assetType, result.currency);
+          result.tradingviewSymbol = `${exchange}:${result.tradingviewSymbol}`;
+          logger.debug(
+            `Fixed tradingviewSymbol format: ${result.tradingviewSymbol}`
+          );
+        }
+
         logger.debug(`✅ AI classified ${assetName}:`, result);
         return result;
       } catch (error) {
@@ -505,6 +732,32 @@ Return ONLY valid JSON in this exact format:
     }
 
     throw lastError || new Error("All models failed to classify asset");
+  }
+
+  /**
+   * Infer exchange based on asset type and currency
+   */
+  private inferExchange(assetType: string, currency: string): string {
+    switch (assetType) {
+      case "crypto":
+        return "BINANCE";
+      case "forex":
+        return "FX";
+      case "commodity":
+        return "TVC";
+      case "index":
+        if (currency === "TRY") return "BIST";
+        if (currency === "EUR") return "XETR";
+        if (currency === "GBP") return "TVC";
+        return "TVC";
+      case "stock":
+        if (currency === "TRY") return "BIST";
+        if (currency === "USD") return "NASDAQ";
+        if (currency === "EUR") return "XETR";
+        return "NASDAQ";
+      default:
+        return "TVC";
+    }
   }
 
   /**

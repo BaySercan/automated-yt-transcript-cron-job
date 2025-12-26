@@ -899,13 +899,17 @@ export class CombinedPredictionsService {
               };
 
               if (!dryRun) {
-                const { error: insertError } = await supabaseService.supabase
+                // Use upsert to handle duplicates - if video_id + asset already exists, update it
+                const { error: upsertError } = await supabaseService.supabase
                   .from("combined_predictions")
-                  .insert(combinedRow);
+                  .upsert(combinedRow, {
+                    onConflict: "video_id,asset",
+                    ignoreDuplicates: false, // Update existing record
+                  });
 
-                if (insertError) {
-                  this.log("error", "Failed to insert combined prediction", {
-                    err: this.safeErrorMessage(insertError),
+                if (upsertError) {
+                  this.log("error", "Failed to upsert combined prediction", {
+                    err: this.safeErrorMessage(upsertError),
                   });
                   errorsCount++;
                 } else {
