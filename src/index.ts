@@ -45,7 +45,7 @@ class FinfluencerTracker {
       await reportingService.save();
 
       logger.info("🚀 Starting Finfluencer Tracker Cron Job", {
-        version: "2.0.12",
+        version: "2.0.13",
         environment: config.timezone,
         model: config.openrouterModel,
       });
