@@ -8,7 +8,7 @@ import { supabaseService } from "../supabase";
  */
 class ReportingService {
   private report: RunReport;
-  private readonly APP_VERSION = "2.0.14";
+  private readonly APP_VERSION = "2.0.15";
 
   constructor() {
     this.report = this.createEmptyReport();
