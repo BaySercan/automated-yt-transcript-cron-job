@@ -202,7 +202,6 @@ export class CombinedPredictionsService {
         )
         .eq("status", "pending")
         .order("horizon_end_date", { ascending: true }) // Process oldest predictions first
-        .order("horizon_end_date", { ascending: true }) // Process oldest predictions first
         .limit(limit);
 
       if (error) {
@@ -916,6 +915,8 @@ export class CombinedPredictionsService {
                 platform: "YouTube",
                 ai_model_extraction: rec.ai_model || null,
                 tradingview_symbol: tradingviewSymbol, // Persist TV symbol
+                quality_score: p.quality_score, // Individual quality score
+                quality_breakdown: p.quality_breakdown, // Individual quality breakdown
               };
 
               if (!dryRun) {

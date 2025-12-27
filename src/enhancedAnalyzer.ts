@@ -60,14 +60,26 @@ CORE LOGIC
 
    If unable to resolve a valid ticker symbol → ignore prediction.
 
-4. WHAT COUNTS AS A PREDICTION
-   Must include ALL of:
-   - A target asset from the allowed list
-   - A directional/future statement (up/down/increase/decrease/etc.)
-   - OR a target price
-   - OR a future time horizon
+4. WHAT COUNTS AS A PREDICTION (UNIVERSAL SEMANTIC LOGIC)
+   A prediction MUST be a forward-looking statement about FUTURE performance. 
+   
+   **REQUIRED LOGIC PATTERN:**
+   \`[Literal Asset] + [Directional Bias] + [Logical Trigger or Target]\`
 
-   If these are missing → NOT a prediction.
+   **STRICT EXCLUSIONS (DO NOT EXTRACT):**
+   - **Past/Present Facts (Declarative)**: Statements about what happened or current levels (e.g., "The price is 50k", "Earnings were high last week").
+   - **Descriptive News**: General reporting without a forecast (e.g., "Nvidia released its new chips").
+   - **Vague Commentary**: General market sentiment without a tradeable signal (e.g., "The market is quite volatile lately").
+   - **Idiomatic/Metaphorical Use**: If an asset name is used as an idiom, verb, or metaphor in the source language (e.g., "undermining", "the gold standard of X").
+
+   **LITERALITY GUARDRAIL:**
+   Only extract if the speaker refers to the literal, tradeable financial instrument in a projective (future) context.
+
+5. HORIZON & TARGETS
+   Must include at least one of:
+   - A target price
+   - OR a future time horizon (even if vague)
+   - OR a logical condition ("if breaks level X", "until inflation drops")
 
 ====================================================================
 PREDICTION EXTRACTION RULESET
@@ -118,7 +130,8 @@ PREDICTION EXTRACTION RULESET
    - Set extraction_metadata.currency_detection_confidence based on clarity
 
 3. NECESSARY CONDITIONS
-   Extract ONLY if explicitly stated (“must hold above 50k”, “if inflation drops”).
+   Extract any logical conditions for the prediction (triggers, stop levels, macroeconomic dependencies).
+   These are crucial for analytical depth. Use flags like "if", "until", "only if", "stays above", etc.
    If none → null.
 
 4. HORIZON RULE (CRITICAL UPDATE)
@@ -334,6 +347,38 @@ ${transcript}
         analysisLanguage
       );
 
+      // Calculate quality scores for each prediction and the video as a whole
+      let maxScore = 0;
+      const scoresBreakdown: any[] = [];
+
+      finalResult.predictions = finalResult.predictions.map((pred) => {
+        const scoreResult = this.calculatePredictionScore(pred);
+        const score = scoreResult.total;
+
+        if (score > maxScore) maxScore = score;
+        scoresBreakdown.push({
+          asset: pred.asset,
+          score: score,
+          breakdown: scoreResult.breakdown,
+        });
+
+        return {
+          ...pred,
+          quality_score: score,
+          quality_breakdown: scoreResult.breakdown,
+        };
+      });
+
+      finalResult.quality_score = maxScore;
+      finalResult.quality_breakdown = {
+        max_score: maxScore,
+        count: finalResult.predictions.length,
+        detailed: scoresBreakdown,
+        is_actionable: finalResult.predictions.some(
+          (p) => (p.quality_score || 0) >= 40
+        ),
+      };
+
       logger.info(
         `Successfully analyzed transcript for video ${videoMetadata.videoId}`,
         {
@@ -343,6 +388,7 @@ ${transcript}
           predictionsFound: finalResult.predictions.length,
           hasFinancialContent: hasFinancialContent,
           contentType: hasFinancialContent ? "financial" : "non-financial",
+          qualityScore: finalResult.quality_score,
         }
       );
 
@@ -972,12 +1018,85 @@ Turkish speakers often discuss two different gold products:
         prediction_date: this.validateDate(pred.prediction_date),
         horizon: this.validateHorizon(pred.horizon),
         target_price: this.validateTargetPrice(pred.target_price),
-        target_price_currency_declared: pred.target_price_currency_declared || null,
-        necessary_conditions_for_prediction: pred.necessary_conditions_for_prediction || null,
+        target_price_currency_declared:
+          pred.target_price_currency_declared || null,
+        necessary_conditions_for_prediction:
+          pred.necessary_conditions_for_prediction || null,
         confidence: this.validateConfidence(pred.confidence),
         extraction_metadata: pred.extraction_metadata || null,
       }))
-      .filter((pred) => pred.asset && pred.prediction_text);
+      .filter((pred) => pred.asset && pred.prediction_text)
+      .filter((pred) => this.isPredictionActionable(pred));
+  }
+
+  /**
+   * Calculate prediction quality score (language-agnostic)
+   * Used to filter out pure news content without actionable predictions
+   */
+  private calculatePredictionScore(pred: Prediction): {
+    total: number;
+    breakdown: Record<string, number>;
+  } {
+    const breakdown: Record<string, number> = {};
+    let total = 0;
+
+    // Directional sentiment is primary indicator (+25)
+    if (pred.sentiment === "bullish" || pred.sentiment === "bearish") {
+      breakdown.direction = 25;
+      total += 25;
+    }
+
+    // Any horizon indicates forward-looking (+15)
+    if (pred.horizon && pred.horizon.value && pred.horizon.value !== "") {
+      breakdown.horizon = 15;
+      total += 15;
+    }
+
+    // Target price is a bonus, not required (+15)
+    if (pred.target_price !== null && pred.target_price !== undefined) {
+      breakdown.targetPrice = 15;
+      total += 15;
+    }
+
+    // Necessary conditions show analytical depth (+10)
+    if (pred.necessary_conditions_for_prediction) {
+      breakdown.conditions = 10;
+      total += 10;
+    }
+
+    // Confidence bonus (+5)
+    if (pred.confidence === "high" || pred.confidence === "medium") {
+      breakdown.confidence = 5;
+      total += 5;
+    }
+
+    return { total, breakdown };
+  }
+
+  /**
+   * Check if prediction is actionable (score >= 20)
+   * Filters out pure news/commentary without forward-looking statements
+   */
+  private isPredictionActionable(pred: Prediction): boolean {
+    const MIN_SCORE_THRESHOLD = 20;
+    const { total, breakdown } = this.calculatePredictionScore(pred);
+
+    if (total < MIN_SCORE_THRESHOLD) {
+      logger.debug(
+        `Filtering low-quality prediction: ${pred.asset}, score: ${total}`,
+        {
+          asset: pred.asset,
+          score: total,
+          breakdown,
+          sentiment: pred.sentiment,
+          horizon: pred.horizon?.value,
+          hasTarget: pred.target_price !== null,
+        }
+      );
+      return false;
+    }
+
+    return true;
   }
 
   private validateModifications(modifications: any[]): AIModification[] {
@@ -1030,13 +1149,13 @@ Turkish speakers often discuss two different gold products:
 
   private validateTargetPrice(price: any): number | null {
     if (price === null || price === undefined) return null;
-    
+
     // Try locale-aware parsing first (handles European and English formats)
     const localeNum = this.parseLocaleNumber(String(price));
     if (localeNum !== null) {
       return localeNum;
     }
-    
+
     // Fallback to direct Number parsing
     const num = Number(price);
     return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
@@ -1077,9 +1196,12 @@ Turkish speakers often discuss two different gold products:
    *   "6,570" → European (6.57) or English (6570)? → assume European (standard in Turkish/DE/FR)
    *   "13.500" → European (13500) or English (13.5)? → assume European (common currency format)
    */
-  private parseLocaleNumber(value: string, transcriptLanguage?: string): number | null {
-    if (!value || typeof value !== 'string') return null;
-    
+  private parseLocaleNumber(
+    value: string,
+    transcriptLanguage?: string
+  ): number | null {
+    if (!value || typeof value !== "string") return null;
+
     const cleaned = value.trim();
     if (cleaned.length === 0) return null;
 
@@ -1090,8 +1212,8 @@ Turkish speakers often discuss two different gold products:
     }
 
     // Detect format: does it have separators?
-    const hasDot = cleaned.includes('.');
-    const hasComma = cleaned.includes(',');
+    const hasDot = cleaned.includes(".");
+    const hasComma = cleaned.includes(",");
 
     // No separators - just return as-is
     if (!hasDot && !hasComma) {
@@ -1101,17 +1223,17 @@ Turkish speakers often discuss two different gold products:
 
     // Both separators present: "1.234,56" or "1,234.56"
     if (hasDot && hasComma) {
-      const dotIndex = cleaned.lastIndexOf('.');
-      const commaIndex = cleaned.lastIndexOf(',');
-      
+      const dotIndex = cleaned.lastIndexOf(".");
+      const commaIndex = cleaned.lastIndexOf(",");
+
       if (commaIndex > dotIndex) {
         // European format: "1.234,56" → remove dot, replace comma with dot
-        const normalized = cleaned.replace(/\./g, '').replace(',', '.');
+        const normalized = cleaned.replace(/\./g, "").replace(",", ".");
         const num = Number(normalized);
         return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
       } else {
         // English format: "1,234.56" → remove comma
-        const normalized = cleaned.replace(/,/g, '');
+        const normalized = cleaned.replace(/,/g, "");
         const num = Number(normalized);
         return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
       }
@@ -1119,30 +1241,30 @@ Turkish speakers often discuss two different gold products:
 
     // Only dots: could be European thousands ("1.234") or English decimal ("1.234")
     if (hasDot && !hasComma) {
-      const parts = cleaned.split('.');
+      const parts = cleaned.split(".");
       if (parts.length === 2) {
         // Single dot: ambiguous
         const afterDot = parts[1];
-        
+
         // If >= 3 digits after dot: likely decimal (European scientific notation)
         if (afterDot.length >= 3) {
           const num = Number(cleaned); // keep as-is
           return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
         }
-        
+
         // If 1-2 digits after dot AND > 2: likely English decimal
         if (afterDot.length <= 2 && !isNaN(Number(afterDot))) {
           const num = Number(cleaned);
           return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
         }
-        
+
         // Otherwise: European thousands separator, remove it
-        const normalized = cleaned.replace(/\./g, '');
+        const normalized = cleaned.replace(/\./g, "");
         const num = Number(normalized);
         return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
       } else if (parts.length > 2) {
         // Multiple dots: European thousands ("1.000.000"), remove all
-        const normalized = cleaned.replace(/\./g, '');
+        const normalized = cleaned.replace(/\./g, "");
         const num = Number(normalized);
         return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
       }
@@ -1150,24 +1272,24 @@ Turkish speakers often discuss two different gold products:
 
     // Only commas: likely European decimal or English thousands
     if (hasComma && !hasDot) {
-      const parts = cleaned.split(',');
+      const parts = cleaned.split(",");
       if (parts.length === 2) {
         const afterComma = parts[1];
-        
+
         // If 1-2 digits after comma: European decimal ("6,57")
         if (afterComma.length <= 2) {
-          const normalized = cleaned.replace(',', '.');
+          const normalized = cleaned.replace(",", ".");
           const num = Number(normalized);
           return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
         }
-        
+
         // If > 2 digits: English thousands ("1,000,000" style - multiple commas expected but only one present)
-        const normalized = cleaned.replace(/,/g, '');
+        const normalized = cleaned.replace(/,/g, "");
         const num = Number(normalized);
         return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
       } else if (parts.length > 2) {
         // Multiple commas: English thousands separator, remove all
-        const normalized = cleaned.replace(/,/g, '');
+        const normalized = cleaned.replace(/,/g, "");
         const num = Number(normalized);
         return !isNaN(num) && isFinite(num) && num > 0 ? num : null;
       }
@@ -1185,29 +1307,33 @@ Turkish speakers often discuss two different gold products:
     if (config.openrouterModel && config.openrouterModel.trim()) {
       return config.openrouterModel.trim();
     }
-    
+
     // Check config fallback model
     if (config.openrouterModel2 && config.openrouterModel2.trim()) {
       return config.openrouterModel2.trim();
     }
-    
+
     // Fallback to environment variables directly
-    const envModel = process.env.OPENROUTER_MODEL || process.env.OPENROUTER_MODEL_2;
+    const envModel =
+      process.env.OPENROUTER_MODEL || process.env.OPENROUTER_MODEL_2;
     if (envModel && envModel.trim()) {
-      logger.warn('Using model from env var (config not available)', { model: envModel });
+      logger.warn("Using model from env var (config not available)", {
+        model: envModel,
+      });
       return envModel.trim();
     }
-    
+
     // CRITICAL: If truly no model configured, fail loudly
-    const errorMsg = '⚠️ CRITICAL: No AI model configured! Must set OPENROUTER_MODEL or OPENROUTER_MODEL_2 in .env';
+    const errorMsg =
+      "⚠️ CRITICAL: No AI model configured! Must set OPENROUTER_MODEL or OPENROUTER_MODEL_2 in .env";
     logger.error(errorMsg, {
       configModel: config.openrouterModel,
       configModel2: config.openrouterModel2,
       envModel: process.env.OPENROUTER_MODEL,
       envModel2: process.env.OPENROUTER_MODEL_2,
     });
-    
-    throw new Error(errorMsg);  // Fail fast instead of returning placeholder
+
+    throw new Error(errorMsg); // Fail fast instead of returning placeholder
   }
 
   /**

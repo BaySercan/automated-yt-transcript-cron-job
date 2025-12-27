@@ -35,7 +35,10 @@ export interface Prediction {
   };
   target_price: number | null;
   target_price_currency_declared?: string | null; // Currency explicitly mentioned for target price (e.g., "USD", "TRY", "EUR")
+  necessary_conditions_for_prediction?: string | null; // Conditions required for prediction to be valid
   confidence: "low" | "medium" | "high";
+  quality_score?: number;
+  quality_breakdown?: any;
   extraction_metadata?: {
     currency_detection_confidence?: "low" | "medium" | "high"; // Confidence in detected currency
     multiple_currencies_detected?: string[]; // List of all currencies found in text
@@ -72,6 +75,8 @@ export interface AIAnalysisResult {
   transcript_summary: string;
   predictions: Prediction[];
   ai_modifications: AIModification[];
+  quality_score?: number;
+  quality_breakdown?: any;
   raw_transcript?: string;
   subject_outcome?: "pending" | "out_of_subject" | "analyzed";
 }

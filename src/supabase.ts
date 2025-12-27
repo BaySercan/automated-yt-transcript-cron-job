@@ -254,6 +254,8 @@ export class SupabaseService {
     aiAnalysisSuccess?: boolean; // Did AI analysis complete successfully?
     hasFinancialContent?: boolean; // Is this financial content?
     aiModel?: string; // AI model used for analysis
+    qualityScore?: number; // Video-level quality score
+    qualityBreakdown?: any; // Video-level quality breakdown
 
     // Context for status determination
     context: {
@@ -304,6 +306,8 @@ export class SupabaseService {
         predictions: predictions,
         ai_modifications: aiModifications,
         ai_model: aiModel,
+        quality_score: params.qualityScore,
+        quality_breakdown: params.qualityBreakdown,
         updated_at: new Date().toISOString(),
       };
 

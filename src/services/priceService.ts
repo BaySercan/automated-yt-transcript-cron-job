@@ -262,6 +262,43 @@ export class PriceService {
   }
 
   /**
+   * Adjust date to the last trading day (for non-crypto assets)
+   * - Saturday → Friday
+   * - Sunday → Friday
+   * - Crypto: no adjustment (trades 24/7)
+   * This prevents wasted API calls on weekends when markets are closed
+   */
+  private getLastTradingDay(date: Date, assetType?: string): Date {
+    // Crypto trades 24/7 - no adjustment needed
+    if (assetType?.toLowerCase() === "crypto") {
+      return date;
+    }
+
+    const adjusted = new Date(date);
+    const dayOfWeek = adjusted.getDay();
+
+    if (dayOfWeek === 6) {
+      // Saturday → go back 1 day to Friday
+      adjusted.setDate(adjusted.getDate() - 1);
+      logger.debug(
+        `Adjusted Saturday ${date.toISOString().split("T")[0]} → Friday ${
+          adjusted.toISOString().split("T")[0]
+        }`
+      );
+    } else if (dayOfWeek === 0) {
+      // Sunday → go back 2 days to Friday
+      adjusted.setDate(adjusted.getDate() - 2);
+      logger.debug(
+        `Adjusted Sunday ${date.toISOString().split("T")[0]} → Friday ${
+          adjusted.toISOString().split("T")[0]
+        }`
+      );
+    }
+
+    return adjusted;
+  }
+
+  /**
    * Get the last known price for an asset from the persistent cache
    * Used for dynamic validation (checking deviation)
    */
@@ -624,7 +661,19 @@ export class PriceService {
   ): Promise<number | null> {
     try {
       reportingService.incrementPriceRequest();
-      const formattedDate = date.toISOString().split("T")[0];
+
+      // SMART TRADING DAY: Adjust weekend dates to last trading day
+      const adjustedDate = this.getLastTradingDay(date, assetType);
+      const wasAdjusted = adjustedDate.getTime() !== date.getTime();
+      if (wasAdjusted) {
+        logger.info(
+          `Smart date adjustment: ${date.toISOString().split("T")[0]} → ${
+            adjustedDate.toISOString().split("T")[0]
+          } (last trading day for ${assetType || "unknown"})`
+        );
+      }
+
+      const formattedDate = adjustedDate.toISOString().split("T")[0];
       const cacheKey = `${asset.toUpperCase()}:${formattedDate}`;
 
       // If tvSymbol provided, extract useful info for routing
@@ -655,7 +704,7 @@ export class PriceService {
       // 0b. Check dedicated asset_prices table (Primary Persistent Cache)
       const persistentPrice = await this.checkAssetPriceTable(
         asset,
-        date,
+        adjustedDate,
         assetType // Pass assetType to checker
       );
       if (persistentPrice !== null) {
@@ -669,7 +718,7 @@ export class PriceService {
       }
 
       // 0c. Check combined_predictions table (Legacy Cache)
-      const cachedPrice = await this.getCachedPrice(asset, date);
+      const cachedPrice = await this.getCachedPrice(asset, adjustedDate);
       if (cachedPrice !== null) {
         logger.info(
           `Using legacy cached price for ${asset} on ${formattedDate}: ${cachedPrice}`
@@ -679,7 +728,7 @@ export class PriceService {
         // Backfill to new table for future speed
         this.saveToAssetPriceTable(
           asset,
-          date,
+          adjustedDate,
           cachedPrice,
           this.detectCurrency(asset),
           "legacy_backfill",
@@ -717,13 +766,13 @@ export class PriceService {
         logger.info(
           `Fetching current crypto price for ${asset} via CoinMarketCap API...`
         );
-        const cmcPrice = await this.fetchCryptoPrice(asset, date);
+        const cmcPrice = await this.fetchCryptoPrice(asset, adjustedDate);
         if (cmcPrice !== null) {
           reportingService.incrementPriceApiCall("coinmarketcap");
           reportingService.incrementPriceSuccess();
           this.saveToAssetPriceTable(
             asset,
-            date,
+            adjustedDate,
             cmcPrice,
             "USD",
             "coinmarketcap",
@@ -738,13 +787,16 @@ export class PriceService {
         logger.info(
           `Fetching historical crypto price for ${asset} via CoinGecko API...`
         );
-        const coinGeckoPrice = await this.fetchCoinGeckoHistory(asset, date);
+        const coinGeckoPrice = await this.fetchCoinGeckoHistory(
+          asset,
+          adjustedDate
+        );
         if (coinGeckoPrice !== null) {
           reportingService.incrementPriceApiCall("coingecko");
           reportingService.incrementPriceSuccess();
           this.saveToAssetPriceTable(
             asset,
-            date,
+            adjustedDate,
             coinGeckoPrice,
             "USD",
             "coingecko",
@@ -771,7 +823,7 @@ export class PriceService {
             reportingService.incrementPriceSuccess();
             this.saveToAssetPriceTable(
               asset,
-              date,
+              adjustedDate,
               goldPrice,
               "USD",
               "usagold",
@@ -795,7 +847,7 @@ export class PriceService {
             reportingService.incrementPriceSuccess();
             this.saveToAssetPriceTable(
               asset,
-              date,
+              adjustedDate,
               tdPrice,
               "TRY",
               "twelvedata",
@@ -820,7 +872,7 @@ export class PriceService {
             reportingService.incrementPriceSuccess();
             this.saveToAssetPriceTable(
               asset,
-              date,
+              adjustedDate,
               silverPrice,
               "USD",
               "usagold",
@@ -834,13 +886,15 @@ export class PriceService {
       // 3.5. XAUTRYG Historical via Twelve Data
       if (assetUpper === "XAUTRYG" && !isToday) {
         logger.info(`Fetching historical XAUTRYG price from Twelve Data...`);
-        const tdHistPrice = await twelveDataService.getHistoricalPrice(date);
+        const tdHistPrice = await twelveDataService.getHistoricalPrice(
+          adjustedDate
+        );
         if (tdHistPrice !== null) {
           reportingService.incrementPriceApiCall("twelvedata");
           reportingService.incrementPriceSuccess();
           this.saveToAssetPriceTable(
             asset,
-            date,
+            adjustedDate,
             tdHistPrice,
             "TRY",
             "twelvedata",
@@ -880,10 +934,10 @@ export class PriceService {
         // BATCH FETCH OPTIMIZATION
         // Instead of fetching just 1 day, fetch the last 30 days to populate cache
         // Start date: 30 days ago. End date: Requested date + 2 days (for weekend coverage)
-        const startDate = new Date(date);
+        const startDate = new Date(adjustedDate);
         startDate.setDate(startDate.getDate() - 30);
 
-        const endDate = new Date(date);
+        const endDate = new Date(adjustedDate);
         endDate.setDate(endDate.getDate() + 2);
 
         // Use the new batch fetching method
@@ -948,7 +1002,7 @@ export class PriceService {
 
           const stooqResult = await stooqService.getHistoricalPrice(
             yahooSymbol,
-            date
+            adjustedDate
           );
           if (stooqResult.close !== null) {
             logger.info(
@@ -958,7 +1012,7 @@ export class PriceService {
             reportingService.incrementPriceSuccess();
             this.saveToAssetPriceTable(
               asset,
-              date,
+              adjustedDate,
               stooqResult.close,
               this.detectCurrency(yahooSymbol),
               "stooq",
@@ -984,7 +1038,7 @@ export class PriceService {
   /**
    * Search for price with fallback to previous dates (for holidays/weekends)
    * Tries exact date first, then falls back to previous dates up to maxLookbackDays
-   * Useful for entry price fetching when market was closed on the original date
+   * Now skips weekends in fallback loop since searchPrice handles weekend adjustment
    */
   async searchPriceWithFallback(
     asset: string,
@@ -992,43 +1046,65 @@ export class PriceService {
     assetType?: string,
     maxLookbackDays: number = 5
   ): Promise<number | null> {
-    // Try exact date first
+    // searchPrice now internally adjusts weekends to Friday, so try it first
     const exactPrice = await this.searchPrice(asset, date, assetType);
     if (exactPrice !== null) {
+      const adjustedDate = this.getLastTradingDay(date, assetType);
       logger.info(
-        `Found price for ${asset} on exact date ${
-          date.toISOString().split("T")[0]
+        `Found price for ${asset} on ${
+          adjustedDate.toISOString().split("T")[0]
         }: ${exactPrice}`
       );
       return exactPrice;
     }
 
-    // If exact date failed, try previous dates
+    // If first attempt failed (possibly a holiday), try previous trading days
     logger.info(
-      `Exact date price not found for ${asset}, trying fallback dates (max ${maxLookbackDays} days back)...`
+      `Price not found for ${asset}, trying fallback dates (max ${maxLookbackDays} trading days back)...`
     );
 
-    for (let i = 1; i <= maxLookbackDays; i++) {
-      const fallbackDate = new Date(date);
-      fallbackDate.setDate(fallbackDate.getDate() - i);
+    let tradingDaysChecked = 0;
+    let daysBack = 1;
 
+    // Loop until we've checked maxLookbackDays trading days
+    while (
+      tradingDaysChecked < maxLookbackDays &&
+      daysBack <= maxLookbackDays * 2
+    ) {
+      const fallbackDate = new Date(date);
+      fallbackDate.setDate(fallbackDate.getDate() - daysBack);
+
+      // Skip weekends for non-crypto
+      const dayOfWeek = fallbackDate.getDay();
+      const isCrypto = assetType?.toLowerCase() === "crypto";
+
+      if (!isCrypto && (dayOfWeek === 0 || dayOfWeek === 6)) {
+        // Skip weekends
+        daysBack++;
+        continue;
+      }
+
+      tradingDaysChecked++;
       const fallbackPrice = await this.searchPrice(
         asset,
         fallbackDate,
         assetType
       );
+
       if (fallbackPrice !== null) {
         logger.info(
           `Found price for ${asset} on fallback date ${
             fallbackDate.toISOString().split("T")[0]
-          } (${i} day(s) back): ${fallbackPrice}`
+          } (${tradingDaysChecked} trading day(s) back): ${fallbackPrice}`
         );
         return fallbackPrice;
       }
+
+      daysBack++;
     }
 
     logger.warn(
-      `No price found for ${asset} within ${maxLookbackDays} days lookback`
+      `No price found for ${asset} within ${maxLookbackDays} trading days lookback`
     );
     return null;
   }

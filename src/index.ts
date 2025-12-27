@@ -432,6 +432,8 @@ class FinfluencerTracker {
                 language: record.language || "english",
                 transcript_length: record.raw_transcript.length,
                 predictions_found: (analysis.predictions || []).length,
+                quality_score: analysis.quality_score,
+                quality_breakdown: analysis.quality_breakdown,
               })
               .eq("id", record.id);
 
@@ -1032,6 +1034,8 @@ class FinfluencerTracker {
         aiAnalysisSuccess: analysisSuccess,
         hasFinancialContent: hasFinancialContent,
         aiModel: globalAIAnalyzer.getModelName(),
+        qualityScore: analysis?.quality_score,
+        qualityBreakdown: analysis?.quality_breakdown,
         context: { isRetry: false },
       });
 

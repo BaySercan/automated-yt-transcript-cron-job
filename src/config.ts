@@ -118,55 +118,52 @@ export const config = {
   },
 };
 
+// Helper to mask sensitive values (shows first 4 + last 4 chars)
+function maskSensitiveValue(value: string | undefined): string {
+  if (!value) return "MISSING";
+  if (value.length < 12) return "CONFIGURED";
+  return `${value.substring(0, 4)}...${value.substring(value.length - 4)}`;
+}
+
 // Validation
 export function validateConfig(): void {
-  console.log("🔍 Configuration Debug:");
+  console.log("🔍 Configuration Status:");
   console.log(
     "- YOUTUBE_API_KEY:",
-    process.env.YOUTUBE_API_KEY ? "PRESENT" : "MISSING"
+    process.env.YOUTUBE_API_KEY ? "CONFIGURED" : "MISSING"
   );
   console.log(
     "- SUPABASE_URL:",
-    process.env.SUPABASE_URL ? "PRESENT" : "MISSING"
+    process.env.SUPABASE_URL ? "CONFIGURED" : "MISSING"
   );
   console.log(
     "- SUPABASE_SERVICE_KEY:",
-    process.env.SUPABASE_SERVICE_KEY ? "PRESENT" : "MISSING"
+    process.env.SUPABASE_SERVICE_KEY ? "CONFIGURED" : "MISSING"
   );
   console.log(
     "- OPENROUTER_API_KEY:",
-    process.env.OPENROUTER_API_KEY ? "PRESENT" : "MISSING"
+    process.env.OPENROUTER_API_KEY ? "CONFIGURED" : "MISSING"
   );
   console.log(
     "- SUPADATA_API_KEY:",
-    process.env.SUPADATA_API_KEY ? "PRESENT" : "MISSING"
+    process.env.SUPADATA_API_KEY ? "CONFIGURED" : "MISSING"
   );
 
-  console.log("Config values:");
-  console.log(
-    "- youtubeApiKey:",
-    config.youtubeApiKey ? `${config.youtubeApiKey.length} chars` : "MISSING"
-  );
+  console.log("Config values (masked):");
+  console.log("- youtubeApiKey:", maskSensitiveValue(config.youtubeApiKey));
   console.log(
     "- supabaseUrl:",
-    config.supabaseUrl ? `${config.supabaseUrl.length} chars` : "MISSING"
+    config.supabaseUrl ? config.supabaseUrl.split(".")[0] + "..." : "MISSING"
   );
   console.log(
     "- supabaseServiceKey:",
-    config.supabaseServiceKey
-      ? `${config.supabaseServiceKey.length} chars`
-      : "MISSING"
+    maskSensitiveValue(config.supabaseServiceKey)
   );
   console.log(
     "- openrouterApiKey:",
-    config.openrouterApiKey
-      ? `${config.openrouterApiKey.length} chars`
-      : "MISSING"
+    maskSensitiveValue(config.openrouterApiKey)
   );
-  console.log(
-    "- supadataApiKey:",
-    config.supadataApiKey ? `${config.supadataApiKey.length} chars` : "MISSING"
-  );
+  console.log("- supadataApiKey:", maskSensitiveValue(config.supadataApiKey));
   console.log("- openrouterModel:", config.openrouterModel);
 
   console.log("Rate Limiting Configuration:");
