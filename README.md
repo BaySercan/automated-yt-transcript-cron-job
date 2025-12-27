@@ -1,4 +1,4 @@
-# Automated YouTube Transcript Generator v2.0.13
+# Automated YouTube Transcript Generator v2.0.14
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
