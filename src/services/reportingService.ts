@@ -257,8 +257,8 @@ class ReportingService {
           .from("run_reports")
           .insert({
             run_id: this.report.run_id,
-            started_at: this.report.started_at,
-            finished_at: this.report.finished_at || null, // Handle empty string or null
+            started_at: this.report.started_at || new Date().toISOString(),
+            finished_at: this.report.finished_at || null,
             duration_ms: this.report.duration_ms,
             status: this.report.status,
             report: this.report,
@@ -274,7 +274,7 @@ class ReportingService {
         const result = await supabaseService.supabase
           .from("run_reports")
           .update({
-            finished_at: this.report.finished_at,
+            finished_at: this.report.finished_at || null,
             duration_ms: this.report.duration_ms,
             status: this.report.status,
             report: this.report,
