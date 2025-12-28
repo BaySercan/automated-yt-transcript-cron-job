@@ -528,6 +528,17 @@ function Main {
         Write-LogInfo "Auto-generated version: $actualVersion"
     }
     
+    # Build before versioning
+    Write-LogInfo "Running npm run build before versioning..."
+    $preBuildOutput = & npm run build 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-LogError "Pre-versioning build failed!"
+        Write-LogInfo "Build output:"
+        Write-Host $preBuildOutput
+        exit 1
+    }
+    Write-LogSuccess "✅ Pre-versioning build succeeded!"
+
     # Sync versions across files if requested
     if ($SyncVersions -or $true) {
         Write-LogInfo "🔄 Synchronizing versions across project files..."
