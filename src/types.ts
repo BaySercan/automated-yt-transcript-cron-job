@@ -164,6 +164,16 @@ export interface RunReport {
     still_pending: number;
   };
 
+  // Stage 7: News Fetching
+  news: {
+    feeds_checked: number;
+    items_found: number;
+    items_processed: number;
+    items_saved: number;
+    non_financial: number;
+    errors: number;
+  };
+
   // System Health
   system: {
     memory_used_mb: number;

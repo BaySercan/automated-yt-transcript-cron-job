@@ -4,7 +4,7 @@ import { youtubeService, YouTubeService } from "./youtube";
 import { globalAIAnalyzer } from "./enhancedAnalyzer";
 import { rapidapiService } from "./rapidapi";
 import { supadataService } from "./supadataService";
-import { supadataRapidAPIService } from "./supadataRapidAPIService";
+import { transcriptAPIService } from "./services/transcriptAPIService";
 import { retryService } from "./retryService";
 import { combinedPredictionsService } from "./combinedPredictionsService";
 import {
@@ -124,14 +124,14 @@ class FinfluencerTracker {
         isConfigured: () => rapidapiService.isConfigured(),
       },
       {
-        name: "Supadata RapidAPI",
-        service: supadataRapidAPIService,
-        isConfigured: () => supadataRapidAPIService.isConfigured(),
-      },
-      {
         name: "Supadata Direct",
         service: supadataService,
         isConfigured: () => supadataService.isConfigured(),
+      },
+      {
+        name: "TranscriptAPI",
+        service: transcriptAPIService,
+        isConfigured: () => transcriptAPIService.isConfigured(),
       },
     ];
 
@@ -845,41 +845,13 @@ class FinfluencerTracker {
         }
       }
 
-      // FALLBACK 2: Try Supadata services if available
+      // FALLBACK 2: Try Supadata Direct if available
       if (!hasValidTranscript) {
         logger.info(
-          `🔄 [TIER 3] Trying Supadata services for video ${video.videoId}`
+          `🔄 [TIER 3] Trying Supadata Direct for video ${video.videoId}`
         );
 
-        // Try Supadata RapidAPI first
-        if (supadataRapidAPIService.isConfigured()) {
-          try {
-            const supadataResult: any =
-              await supadataRapidAPIService.getVideoTranscript(video.videoId);
-            if (
-              supadataResult &&
-              typeof supadataResult === "object" &&
-              "transcript" in supadataResult
-            ) {
-              transcriptText = supadataResult.transcript;
-              hasValidTranscript =
-                transcriptText && transcriptText.trim().length >= 50;
-              transcriptSource = "supadata_rapidapi";
-              logger.info(
-                `✅ [TIER 3A SUCCESS] Supadata RapidAPI transcript for video ${video.videoId} (${transcriptText.length} characters)`
-              );
-            }
-          } catch (supadataRapidError) {
-            logger.warn(
-              `⚠️ [TIER 3A FAILED] Supadata RapidAPI failed for video ${
-                video.videoId
-              }: ${(supadataRapidError as Error).message}`
-            );
-          }
-        }
-
-        // Try Supadata direct if RapidAPI variant failed
-        if (!hasValidTranscript && supadataService.isConfigured()) {
+        if (supadataService.isConfigured()) {
           try {
             const supadataResult: any =
               await supadataService.getVideoTranscript(video.videoId);
@@ -893,12 +865,12 @@ class FinfluencerTracker {
                 transcriptText && transcriptText.trim().length >= 50;
               transcriptSource = "supadata_direct";
               logger.info(
-                `✅ [TIER 3B SUCCESS] Supadata Direct transcript for video ${video.videoId} (${transcriptText.length} characters)`
+                `✅ [TIER 3 SUCCESS] Supadata Direct transcript for video ${video.videoId} (${transcriptText.length} characters)`
               );
             }
           } catch (supadataDirectError) {
             logger.warn(
-              `⚠️ [TIER 3B FAILED] Supadata Direct failed for video ${
+              `⚠️ [TIER 3 FAILED] Supadata Direct failed for video ${
                 video.videoId
               }: ${(supadataDirectError as Error).message}`
             );
@@ -1145,6 +1117,16 @@ class FinfluencerTracker {
         creditsUsed: creditStats.creditsUsed,
         creditsRemaining: creditStats.creditsRemaining,
         activeEndpoint: creditStats.activeEndpoint,
+      });
+    }
+
+    // Log final TranscriptAPI stats
+    if (transcriptAPIService.isConfigured()) {
+      const creditStats = transcriptAPIService.getCreditStats();
+      logger.info("💳 Final TranscriptAPI Credit Status:", {
+        creditsUsed: creditStats.creditsUsed,
+        creditsRemaining: creditStats.creditsRemaining,
+        lastCheck: creditStats.lastCheck,
       });
     }
 

@@ -68,6 +68,14 @@ class ReportingService {
         resolved_wrong: 0,
         still_pending: 0,
       },
+      news: {
+        feeds_checked: 0,
+        items_found: 0,
+        items_processed: 0,
+        items_saved: 0,
+        non_financial: 0,
+        errors: 0,
+      },
       system: { memory_used_mb: 0, errors: [] },
     };
   }
@@ -178,6 +186,26 @@ class ReportingService {
   }
   incrementVerificationPending(): void {
     this.report.verification.still_pending++;
+  }
+
+  // News
+  incrementNewsFeedsChecked(): void {
+    this.report.news.feeds_checked++;
+  }
+  addNewsItemsFound(count: number): void {
+    this.report.news.items_found += count;
+  }
+  incrementNewsProcessed(): void {
+    this.report.news.items_processed++;
+  }
+  incrementNewsSaved(): void {
+    this.report.news.items_saved++;
+  }
+  incrementNewsNonFinancial(): void {
+    this.report.news.non_financial++;
+  }
+  incrementNewsErrors(): void {
+    this.report.news.errors++;
   }
 
   // System
@@ -375,22 +403,30 @@ class ReportingService {
     );
     console.log(`╠${line}╣`);
 
-    // Row 3: Verification | System
-    console.log(`║ ${"VERIFICATION".padEnd(20)}│ ${"SYSTEM".padEnd(41)} ║`);
+    // Row 3: Verification | News | System
+    console.log(
+      `║ ${"VERIFICATION".padEnd(20)}│ ${"NEWS".padEnd(20)}│ ${"SYSTEM".padEnd(
+        18
+      )} ║`
+    );
     console.log(
       `║ Correct: ${String(r.verification.resolved_correct).padEnd(
         11
-      )}│ Memory: ${(r.system.memory_used_mb + " MB").padEnd(33)} ║`
+      )}│ Found: ${String(r.news.items_found).padEnd(13)}│ Memory: ${String(
+        r.system.memory_used_mb + " MB"
+      ).padEnd(9)} ║`
     );
     console.log(
       `║ Wrong: ${String(r.verification.resolved_wrong).padEnd(
         13
-      )}│ Errors: ${String(r.system.errors.length).padEnd(33)} ║`
+      )}│ Saved: ${String(r.news.items_saved).padEnd(13)}│ Errors: ${String(
+        r.system.errors.length
+      ).padEnd(9)} ║`
     );
     console.log(
       `║ Pending: ${String(r.verification.still_pending).padEnd(
         11
-      )}│${"".padEnd(42)} ║`
+      )}│ NonFin: ${String(r.news.non_financial).padEnd(12)}│${"".padEnd(18)} ║`
     );
     console.log(`╚${line}╝`);
     console.log("");

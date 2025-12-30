@@ -3,6 +3,7 @@ import * as cheerio from "cheerio";
 import { supabaseService } from "../supabase";
 import { config } from "../config";
 import { logger, retryWithBackoff, cleanJsonResponse, sleep } from "../utils";
+import { reportingService } from "./reportingService";
 
 interface NewsItem {
   title: string;
@@ -77,29 +78,33 @@ export class NewsService {
       const allItems: NewsItem[] = [];
       for (const feed of this.feeds) {
         try {
+          reportingService.incrementNewsFeedsChecked();
           const items = await this.fetchAndParseFeed(feed.url, feed.source);
           allItems.push(...items);
         } catch (error) {
           logger.error(`Failed to fetch feed ${feed.url}`, { error });
+          reportingService.incrementNewsErrors();
         }
       }
 
+      // Track total items found
+      reportingService.addNewsItemsFound(allItems.length);
       logger.info(`Found ${allItems.length} total news items from RSS feeds`);
-      console.log(`Found ${allItems.length} total news items from RSS feeds`);
 
       // 2. Filter existing URLs
       const newItems = await this.filterNewItems(allItems);
       logger.info(`Found ${newItems.length} new items to process`);
-      console.log(`Found ${newItems.length} new items to process`);
 
       // 3. Process new items (Scrape + AI Analyze + Save)
       for (const item of newItems) {
         try {
+          reportingService.incrementNewsProcessed();
           await this.processSingleItem(item);
           // Rate limit delay
           await sleep(2000);
         } catch (error) {
           logger.error(`Failed to process news item: ${item.title}`, { error });
+          reportingService.incrementNewsErrors();
         }
       }
 
@@ -107,9 +112,9 @@ export class NewsService {
       await this.cleanupOldNews();
 
       logger.info("✅ News processing completed");
-      logger.info("✅ News processing completed");
     } catch (error) {
       logger.error("❌ News processing failed", { error });
+      reportingService.incrementNewsErrors();
     }
   }
 
@@ -179,6 +184,7 @@ export class NewsService {
     const analysis = await this.analyzeWithAI(item.title, scraped.content);
     if (!analysis || !analysis.is_financial_related) {
       logger.info(`Skipping - Not financial/market related: ${item.title}`);
+      reportingService.incrementNewsNonFinancial();
       return;
     }
 
@@ -199,9 +205,11 @@ export class NewsService {
       });
 
     if (error) {
+      reportingService.incrementNewsErrors();
       throw error;
     }
 
+    reportingService.incrementNewsSaved();
     logger.info(`✅ Saved news: ${item.title} [${analysis.category}]`);
   }
 

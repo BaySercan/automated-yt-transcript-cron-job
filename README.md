@@ -1,4 +1,4 @@
-# Automated YouTube Transcript Generator v2.0.17
+# Automated YouTube Transcript Generator v2.0.18
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
@@ -8,7 +8,7 @@ The cron job automatically:
 
 1. Fetches active YouTube channel IDs from a Supabase table
 2. Retrieves new videos since each channel's last check date
-3. Downloads video transcripts using YouTube Data API v3 + RapidAPI
+3. Downloads video transcripts using a **3-tier fallback system**
 4. Validates transcript quality (minimum 50 characters, real captions)
 5. Analyzes transcripts using AI models hosted on OpenRouter
 6. Parses structured JSON output and saves to Supabase
@@ -30,10 +30,33 @@ The cron job automatically:
 - **⚡ Performance Optimized**: Memory-efficient processing with adaptive polling
 - **🎯 Transcript Validation**: Heuristic validation to ensure real captions/subtitles
 
+### Transcript Fetching (3-Tier Fallback System)
+
+The transcript generation system uses a resilient **3-tier architecture** with automatic failover:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TRANSCRIPT FETCHING                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Tier 1: RapidAPI           (Primary - async 2-step process)   │
+│    ↓ (on failure)                                               │
+│  Tier 2: Supadata Direct    (Secondary - mixed sync/async)     │
+│    ↓ (on failure)                                               │
+│  Tier 3: TranscriptAPI.com  (Tertiary - simple GET request)    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Protection Mechanisms:**
+
+- **Circuit Breaker**: Stops calling failing services after 8 failures, auto-resets after 2 minutes
+- **Rate Limiting**: Per-service rate limits with jitter to prevent thundering herd
+- **Retry with Backoff**: Automatic retry with exponential backoff for transient failures
+- **Adaptive Polling**: Starts fast (10s) and slows down (up to 60s) for long-running requests
+
 ### Price Data & Verification
 
 - **💾 Persistent Price Cache**:
-  - NEW: `asset_prices` table stores all fetched prices to minimize API costs
+  - `asset_prices` table stores all fetched prices to minimize API costs
   - Batch saving mechanism for high-performance caching
   - Intelligent cache invalidation and source tracking
 - **💰 Multi-Provider Price Fetching**:
@@ -65,6 +88,7 @@ The cron job automatically:
 - **Scheduler**: Northflank Cron Job (daily at 23:30)
 - **Database**: Supabase (PostgreSQL)
 - **AI Provider**: OpenRouter API (for transcript analysis)
+- **Transcript APIs**: RapidAPI, Supadata, TranscriptAPI.com
 - **Price APIs**: Yahoo Finance, Twelve Data, Stooq, CoinMarketCap, CoinGecko, Google Finance
 - **Deployment**: Docker
 - **Configuration**: Environment variables
@@ -74,18 +98,20 @@ The cron job automatically:
 ```bash
 /src
  ├─ index.ts                     # Main FinfluencerTracker class with cron logic
- ├─ youtube.ts                   # YouTube Data API v3 service
- ├─ rapidapi.ts                  # RapidAPI transcript service
- ├─ enhancedAnalyzer.ts          # AI analysis using OpenRouter with Supabase AI integration
+ ├─ youtube.ts                   # YouTube service with 3-tier transcript fallback
+ ├─ rapidapi.ts                  # RapidAPI transcript service (Tier 1)
+ ├─ supadataService.ts           # Supadata Direct service (Tier 2)
+ ├─ enhancedAnalyzer.ts          # AI analysis using OpenRouter
  ├─ supabase.ts                  # Database operations and health checks
  ├─ types.ts                     # TypeScript interfaces and types
- ├─ utils.ts                     # Logging, retries, JSON validation, utilities
+ ├─ utils.ts                     # Rate limiting, circuit breaker, utilities
  ├─ config.ts                    # Environment configuration and validation
  ├─ retryService.ts              # Automatic retry service for failed predictions
  ├─ combinedPredictionsService.ts # Combines predictions, fetches prices, verification
  ├─ predictionChecker.ts         # Prediction verification against market data
  ├─ /services
- │  ├─ reportingService.ts       # NEW: Centralized statistics and reporting
+ │  ├─ transcriptAPIService.ts   # TranscriptAPI.com service (Tier 3)
+ │  ├─ reportingService.ts       # Centralized statistics and reporting
  │  ├─ priceService.ts           # Multi-provider price fetching with persistent cache
  │  ├─ yahooService.ts           # Yahoo Finance integration (3-day window)
  │  ├─ twelveDataService.ts      # Twelve Data integration (XAUTRYG)
@@ -108,7 +134,7 @@ Raw prediction data extracted from video transcripts.
 
 Enhanced prediction table with market data, normalized assets, and verification status.
 
-### Table 4 — `run_reports` (NEW)
+### Table 4 — `run_reports`
 
 Comprehensive execution logs replacing legacy function_logs.
 
@@ -122,7 +148,7 @@ Comprehensive execution logs replacing legacy function_logs.
 | status      | varchar   | success, partial, failed       |
 | report      | jsonb     | Full hierarchical JSON report  |
 
-### Table 5 — `asset_prices` (NEW)
+### Table 5 — `asset_prices`
 
 Persistent price cache to reduce external API dependence.
 
@@ -143,24 +169,57 @@ The service now uses a **Persistent Cache Strategy**:
 3. **External API**: If not found, fetch from external providers (Yahoo, Stooq, etc.).
 4. **Save to Cache**: Successfully fetched prices are saved to `asset_prices` for future use (forever).
 
-## 🔄 Recent Updates (v2.0.3)
+## 🔄 Recent Updates
 
-### Major Refactoring & Statistics
+### v2.0.18 - Transcript System Improvements
 
-- ✅ **New Reporting System**: Replaced `CronJobStats` with `ReportingService` and `run_reports` table.
-- ✅ **Persistent Price Cache**: Implemented `asset_prices` table to minimize API calls and store history.
-- ✅ **Strict Verification**: Now correctly marks predictions as `wrong` if horizon date passes without target validation.
-- ✅ **USAGOLD Integration**: Added specific scraper for Gold/Silver prices from USAGOLD.
-- ✅ **Code Cleanup**: Removed legacy `function_logs` and unused dependencies.
-- ✅ **Batch Processing**: Optimized Yahoo Finance fetching with batch history retrieval.
+- ✅ **NEW: TranscriptAPI.com Integration**: Added as Tier 3 in fallback chain
+- ✅ **Circuit Breaker Pattern**: Properly implemented across all transcript services
+- ✅ **Optimized Polling**: RapidAPI polling now starts at 10s (was 30s) for faster responses
+- ✅ **Retry with Backoff**: TranscriptAPI now retries up to 3x on transient failures
+- ✅ **Rate Limit Monitoring**: Added `RateLimitMonitor` across all transcript services
+- ✅ **Graceful Shutdown**: Now logs TranscriptAPI credit stats on shutdown
+- ✅ **Removed**: supadataRapidAPIService (consolidated into Supadata Direct)
 
-### Price Fetching & Verification
+### v2.0.17 - Statistics & Reporting
+
+- ✅ **New Reporting System**: Replaced `CronJobStats` with `ReportingService` and `run_reports` table
+- ✅ **Persistent Price Cache**: Implemented `asset_prices` table to minimize API calls
+- ✅ **Strict Verification**: Correctly marks predictions as `wrong` if horizon passes
+
+### v2.0.3 - Price Fetching & Verification
 
 - ✅ **Stooq Fallback**: Added Stooq.com as fallback price source
 - ✅ **Twelve Data Integration**: Dedicated source for Turkish Gram Gold (XAUTRYG)
-- ✅ **BIST 100 Support**: Full support for Istanbul Stock Exchange (XU100.IS → ^xutry)
+- ✅ **BIST 100 Support**: Full support for Istanbul Stock Exchange
 - ✅ **3-Day Window**: Yahoo Finance now uses 3-day window for reliability
-- ✅ **Retry Logic**: Stooq automatically retries previous days for missing data
+
+## ⚙️ Environment Variables
+
+### Required
+
+| Variable                    | Description                        |
+| --------------------------- | ---------------------------------- |
+| `SUPABASE_URL`              | Supabase project URL               |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key          |
+| `YOUTUBE_API_KEY`           | YouTube Data API v3 key            |
+| `OPENROUTER_API_KEY`        | OpenRouter API key for AI analysis |
+
+### Transcript Services (at least one required)
+
+| Variable                    | Description                                  |
+| --------------------------- | -------------------------------------------- |
+| `RAPIDAPI_KEY`              | RapidAPI key for transcript service (Tier 1) |
+| `SUPADATA_API_KEY`          | Supadata API key (Tier 2)                    |
+| `TRANSCRIPTAPI_COM_API_KEY` | TranscriptAPI.com API key (Tier 3)           |
+
+### Optional
+
+| Variable                    | Description         | Default                          |
+| --------------------------- | ------------------- | -------------------------------- |
+| `AI_MODEL_1`                | Primary AI model    | `deepseek/deepseek-chat-v3-0324` |
+| `TRANSCRIPTAPI_RATE_LIMIT`  | Requests per second | `0.5`                            |
+| `TRANSCRIPTAPI_MAX_RETRIES` | Max retry attempts  | `3`                              |
 
 ---
 

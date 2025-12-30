@@ -280,6 +280,10 @@ export class YouTubeService {
             }
           );
         }
+      } else {
+        logger.debug(
+          `⏭️ [TIER 1 SKIPPED] RapidAPI not configured for video ${videoId}`
+        );
       }
 
       // ========== TIER 2: SUPADATA DIRECT (Secondary) ==========
@@ -323,6 +327,10 @@ export class YouTubeService {
             }
           );
         }
+      } else {
+        logger.debug(
+          `⏭️ [TIER 2 SKIPPED] Supadata Direct not configured for video ${videoId}`
+        );
       }
 
       // ========== TIER 3: TRANSCRIPTAPI.COM (Tertiary) ==========
@@ -369,6 +377,10 @@ export class YouTubeService {
             );
           }
         }
+      } else {
+        logger.warn(
+          `⚠️ [TIER 3 NOT AVAILABLE] TranscriptAPI.com not configured (missing TRANSCRIPTAPI_COM_API_KEY) for video ${videoId}`
+        );
       }
 
       // ========== ALL TIERS FAILED ==========
