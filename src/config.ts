@@ -33,6 +33,11 @@ export const config = {
   cmcProApiKey: process.env.CMC_PRO_API_KEY || "",
   coingeckoApiKey: process.env.COINGECKO_API_KEY || "",
 
+  // TranscriptAPI.com
+  transcriptApiKey: process.env.TRANSCRIPTAPI_COM_API_KEY || "",
+  transcriptApiUrl:
+    process.env.TRANSCRIPTAPI_URL || "https://transcriptapi.com/api/v2",
+
   // Application
   startDate: process.env.START_DATE || "2025-01-01",
   timezone: process.env.TZ || "Europe/Istanbul",

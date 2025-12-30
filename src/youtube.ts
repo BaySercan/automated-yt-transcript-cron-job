@@ -13,7 +13,7 @@ import {
 } from "./utils";
 import { rapidapiService } from "./rapidapi";
 import { supadataService } from "./supadataService";
-import { supadataRapidAPIService } from "./supadataRapidAPIService";
+import { transcriptAPIService } from "./services/transcriptAPIService";
 
 export class YouTubeService {
   private youtube: youtube_v3.Youtube;
@@ -282,52 +282,11 @@ export class YouTubeService {
         }
       }
 
-      // ========== TIER 2: SUPADATA RAPIDAPI (Secondary) ==========
-      if (supadataRapidAPIService.isConfigured()) {
-        try {
-          logger.info(
-            `🎯 [TIER 2] Fetching transcript from Supadata RapidAPI for video ${videoId}`
-          );
-          const startTime = Date.now();
-
-          const transcript = await supadataRapidAPIService.getVideoTranscript(
-            videoId
-          );
-
-          if (transcript && transcript.trim().length > 0) {
-            const duration = Date.now() - startTime;
-            logger.info(
-              `✅ [TIER 2 SUCCESS] Supadata RapidAPI transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
-            );
-            return { transcript };
-          }
-        } catch (error) {
-          const isRateLimitError =
-            (error as Error).message.includes("429") ||
-            (error as Error).message.includes("rate limit");
-          const isCreditError =
-            (error as Error).message.includes("insufficient") ||
-            (error as Error).message.includes("credit");
-
-          let errorType = "failed";
-          if (isRateLimitError) errorType = "rate_limited";
-          else if (isCreditError) errorType = "credits_exhausted";
-
-          logger.warn(
-            `❌ [TIER 2 ${errorType.toUpperCase()}] Supadata RapidAPI transcript failed for video ${videoId}, trying Tier 3`,
-            {
-              error: (error as Error).message,
-              service: "supadata-rapidapi",
-            }
-          );
-        }
-      }
-
-      // ========== TIER 3: SUPADATA DIRECT (Tertiary) ==========
+      // ========== TIER 2: SUPADATA DIRECT (Secondary) ==========
       if (supadataService.isConfigured()) {
         try {
           logger.info(
-            `🎯 [TIER 3] Fetching transcript from Supadata Direct for video ${videoId}`
+            `🎯 [TIER 2] Fetching transcript from Supadata Direct for video ${videoId}`
           );
           const startTime = Date.now();
 
@@ -336,7 +295,7 @@ export class YouTubeService {
           if (transcript && transcript.trim().length > 0) {
             const duration = Date.now() - startTime;
             logger.info(
-              `✅ [TIER 3 SUCCESS] Supadata Direct transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
+              `✅ [TIER 2 SUCCESS] Supadata Direct transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
             );
             return { transcript };
           }
@@ -347,22 +306,68 @@ export class YouTubeService {
 
           if (isCreditError) {
             logger.error(
-              `💳 [TIER 3 CREDITS EXHAUSTED] Supadata Direct credits exhausted for video ${videoId}`,
+              `💳 [TIER 2 CREDITS EXHAUSTED] Supadata Direct credits exhausted for video ${videoId}`,
               {
                 error: (error as Error).message,
                 service: "supadata-direct",
               }
             );
-            return { transcript: null, error: "supadata_credits_exhausted" };
+            // Don't return early - try Tier 3
           }
 
           logger.warn(
-            `❌ [TIER 3 FAILED] Supadata Direct transcript failed for video ${videoId}`,
+            `❌ [TIER 2 FAILED] Supadata Direct transcript failed for video ${videoId}`,
             {
               error: (error as Error).message,
               service: "supadata-direct",
             }
           );
+        }
+      }
+
+      // ========== TIER 3: TRANSCRIPTAPI.COM (Tertiary) ==========
+      if (transcriptAPIService.isConfigured()) {
+        try {
+          logger.info(
+            `🎯 [TIER 3] Fetching transcript from TranscriptAPI.com for video ${videoId}`
+          );
+          const startTime = Date.now();
+
+          const transcript = await transcriptAPIService.getVideoTranscript(
+            videoId
+          );
+
+          if (transcript && transcript.trim().length > 0) {
+            const duration = Date.now() - startTime;
+            logger.info(
+              `✅ [TIER 3 SUCCESS] TranscriptAPI.com transcript for video ${videoId} (${transcript.length} characters, ${duration}ms)`
+            );
+            return { transcript };
+          }
+        } catch (error) {
+          const isCreditError =
+            (error as Error).message.includes("insufficient") ||
+            (error as Error).message.includes("credit") ||
+            (error as Error).message.includes("Payment Required");
+
+          if (isCreditError) {
+            logger.error(
+              `💳 [TIER 3 CREDITS EXHAUSTED] TranscriptAPI.com credits exhausted for video ${videoId}`,
+              {
+                error: (error as Error).message,
+                service: "transcriptapi",
+              }
+            );
+            // Don't return early - fall through to ALL TIERS FAILED
+          } else {
+            logger.warn(
+              `❌ [TIER 3 FAILED] TranscriptAPI.com transcript failed for video ${videoId}`,
+              {
+                error: (error as Error).message,
+                service: "transcriptapi",
+              }
+            );
+          }
         }
       }
 
@@ -543,9 +548,9 @@ export class YouTubeService {
   getApiStats(): any {
     return {
       rapidapi: rapidapiService.getRateLimitStats(),
-      supadataRapidAPI: supadataRapidAPIService.getRateLimitStats(),
       supadata: supadataService.getRateLimitStats(),
       supadataCredits: supadataService.getCreditStats(),
+      transcriptapi: transcriptAPIService.getRateLimitStats(),
     };
   }
 }
