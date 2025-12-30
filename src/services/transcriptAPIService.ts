@@ -51,8 +51,8 @@ export class TranscriptAPIService {
   private lastCreditCheck: Date | null = null;
 
   constructor() {
-    // TranscriptAPI rate limiting - conservative to avoid hitting limits
-    this.rateLimiter = new EnhancedRateLimiter(0.5); // 1 request per 2 seconds
+    // TranscriptAPI rate limiting - use config value
+    this.rateLimiter = new EnhancedRateLimiter(config.transcriptapiRateLimit);
 
     // Circuit breaker for TranscriptAPI
     this.circuitBreaker = new CircuitBreaker(
@@ -102,6 +102,7 @@ export class TranscriptAPIService {
 
   /**
    * Get video transcript from TranscriptAPI.com
+   * Uses circuit breaker pattern and retry with backoff for reliability
    * @param videoId YouTube video ID
    * @returns Plain text transcript without timestamps
    */
@@ -110,22 +111,57 @@ export class TranscriptAPIService {
       throw new TranscriptError("TranscriptAPI is not configured");
     }
 
-    // Check circuit breaker
-    if (this.circuitBreaker.getStatus().isOpen) {
-      throw new TranscriptError("TranscriptAPI circuit breaker is open");
-    }
-
-    const apiKey = process.env.TRANSCRIPTAPI_COM_API_KEY!;
-    const url = `${this.baseUrl}/youtube/transcript`;
+    const startTime = Date.now();
 
     try {
-      // Wait for rate limiter
-      await this.rateLimiter.wait();
+      // Use circuit breaker's execute() method for proper failure tracking
+      return await this.circuitBreaker.execute(async () => {
+        // Add retry with backoff for transient failures
+        return await retryWithBackoff(
+          async () => this.fetchTranscriptFromAPI(videoId),
+          config.transcriptapiMaxRetries,
+          2000 // 2 second base delay
+        );
+      });
+    } catch (error) {
+      const totalTime = Date.now() - startTime;
+      const isRateLimitError =
+        (error as Error).message.includes("429") ||
+        (error as Error).message.includes("Rate limit");
 
-      logger.debug(
-        `Fetching transcript from TranscriptAPI for video ${videoId}`
+      logger.error(`TranscriptAPI failed for video ${videoId}`, {
+        error: (error as Error).message,
+        totalTime,
+        isRateLimitError,
+      });
+
+      // Record metrics
+      RateLimitMonitor.recordRequest(
+        "transcriptapi",
+        false,
+        totalTime,
+        isRateLimitError
       );
 
+      throw error;
+    }
+  }
+
+  /**
+   * Internal method to fetch transcript from API
+   * Separated for use with retryWithBackoff
+   */
+  private async fetchTranscriptFromAPI(videoId: string): Promise<string> {
+    const apiKey = process.env.TRANSCRIPTAPI_COM_API_KEY!;
+    const url = `${this.baseUrl}/youtube/transcript`;
+    const startTime = Date.now();
+
+    // Wait for rate limiter
+    await this.rateLimiter.wait();
+
+    logger.debug(`Fetching transcript from TranscriptAPI for video ${videoId}`);
+
+    try {
       const response = await axios.get<TranscriptAPIResponse>(url, {
         params: {
           video_url: videoId,
@@ -140,6 +176,8 @@ export class TranscriptAPIService {
         timeout: config.requestTimeout,
       });
 
+      const responseTime = Date.now() - startTime;
+
       // Track credit usage from response headers
       this.updateCreditInfo(response.headers);
 
@@ -151,16 +189,19 @@ export class TranscriptAPIService {
         );
       }
 
+      // Record successful metrics
+      RateLimitMonitor.recordRequest("transcriptapi", true, responseTime);
+
       logger.info(`TranscriptAPI transcript fetched for video ${videoId}`, {
         language: data.language,
         length: data.transcript.length,
+        responseTime,
         creditsRemaining: this.creditsRemaining,
       });
 
       return data.transcript;
     } catch (error) {
-      // Failure is tracked via the circuit breaker's execute pattern
-      // For now, we just log and rethrow
+      const responseTime = Date.now() - startTime;
 
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError<TranscriptAPIErrorResponse>;
@@ -171,6 +212,15 @@ export class TranscriptAPIService {
         if (axiosError.response?.headers) {
           this.updateCreditInfo(axiosError.response.headers);
         }
+
+        // Record metrics for specific error types
+        const isRateLimitError = status === 429;
+        RateLimitMonitor.recordRequest(
+          "transcriptapi",
+          false,
+          responseTime,
+          isRateLimitError
+        );
 
         if (status === 401) {
           throw new TranscriptError(
@@ -191,13 +241,14 @@ export class TranscriptAPIService {
             `TranscriptAPI: Invalid video URL or ID: ${videoId}`
           );
         } else if (status === 429) {
-          // Handle rate limiting with exponential backoff
+          // Handle rate limiting - use enhanced rate limiter's 429 handling
           const retryAfter = axiosError.response?.headers["retry-after"];
           logger.warn(
             `TranscriptAPI rate limited, retry after: ${
               retryAfter || "unknown"
             }`
           );
+          await this.rateLimiter.handle429Error();
           throw new TranscriptError("TranscriptAPI: Rate limit exceeded");
         } else if (status === 503) {
           throw new TranscriptError("TranscriptAPI: Service unavailable");

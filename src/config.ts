@@ -72,6 +72,11 @@ export const config = {
   supadataMaxPollTime: 1500000, // 25 minutes (same as RapidAPI)
   supadataCreditsThreshold: 20, // Switch to RapidAPI version when main credits < 20
 
+  // TranscriptAPI settings
+  transcriptapiMaxRetries: 3,
+  transcriptapiTimeout: 60000, // 60 seconds (single request, no polling)
+  transcriptapiRateLimit: 0.5, // 1 request per 2 seconds
+
   // Enhanced Rate Limiting Configuration
   rateLimiting: {
     // Retry Service Settings
