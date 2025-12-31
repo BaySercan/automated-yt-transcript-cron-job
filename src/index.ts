@@ -45,7 +45,7 @@ class FinfluencerTracker {
       await reportingService.save();
 
       logger.info("🚀 Starting Finfluencer Tracker Cron Job", {
-        version: "2.0.19",
+        version: "2.0.20",
         environment: config.timezone,
         model: config.openrouterModel,
       });
@@ -974,133 +974,33 @@ class FinfluencerTracker {
     logger.info(`🔍 Processing video: ${video.title} (${video.videoId})`);
 
     try {
-      // PREFER RAPIDAPI FOR TRANSCRIPTS: Try RapidAPI first (most reliable)
-      let transcriptText = "";
-      let transcriptSource = "none";
-      let hasValidTranscript = false;
+      // Use the centralized 3-tier fallback system in youtubeService
+      // This handles: RapidAPI (Tier 1) → Supadata (Tier 2) → TranscriptAPI (Tier 3)
+      const transcriptResult = await youtubeService.getVideoTranscript(
+        video.videoId,
+        video.defaultLanguage
+      );
 
-      if (rapidapiService.isConfigured()) {
-        try {
-          logger.info(
-            `🎯 [TIER 1] Fetching transcript from RapidAPI for video ${video.videoId}`
-          );
-          transcriptText = await rapidapiService.getVideoTranscript(
-            video.videoId
-          );
-          hasValidTranscript =
-            transcriptText && transcriptText.trim().length >= 50;
-          transcriptSource = "rapidapi";
+      // Normalize transcript to a string
+      const transcriptText =
+        typeof transcriptResult === "string"
+          ? transcriptResult
+          : transcriptResult?.transcript ?? "";
 
-          if (hasValidTranscript) {
-            logger.info(
-              `✅ [TIER 1 SUCCESS] RapidAPI transcript for video ${video.videoId} (${transcriptText.length} characters)`
-            );
-          }
-        } catch (rapidapiError) {
-          logger.warn(
-            `⚠️ [TIER 1 FAILED] RapidAPI failed for video ${video.videoId}: ${
-              (rapidapiError as Error).message
-            }`
-          );
-          // Continue to fallback methods
-        }
-      }
+      // Heuristic validation: only accept transcripts that look like real captions/subtitles
+      const isValidTranscript = (text: string) => {
+        if (!text) return false;
+        const trimmed = text.trim();
+        if (trimmed.length < 50) return false; // too short to be a real transcript
+        // prefer transcripts with line breaks (common in captions) or enough words
+        if (trimmed.includes("\n") || trimmed.split(/\s+/).length > 20)
+          return true;
+        return false;
+      };
 
-      // FALLBACK: Try YouTube native methods if RapidAPI failed
-      if (!hasValidTranscript) {
-        logger.info(
-          `🔄 [TIER 2] Trying YouTube native methods for video ${video.videoId}`
-        );
+      const hasValidTranscript = isValidTranscript(transcriptText);
 
-        try {
-          // Prefer captions-only retrieval: if youtubeService exposes getVideoCaptions, use it.
-          // Otherwise fall back to getVideoTranscript but we'll validate the result to avoid synthesized transcripts.
-          let transcriptResult: any;
-          if (typeof (youtubeService as any).getVideoCaptions === "function") {
-            transcriptResult = await (youtubeService as any).getVideoCaptions(
-              video.videoId,
-              video.defaultLanguage
-            );
-          } else {
-            transcriptResult = await youtubeService.getVideoTranscript(
-              video.videoId,
-              video.defaultLanguage
-            );
-          }
-
-          // Normalize transcript to a string (some implementations return { transcript, error })
-          transcriptText =
-            typeof transcriptResult === "string"
-              ? transcriptResult
-              : transcriptResult?.transcript ??
-                transcriptResult?.transcriptText ??
-                "";
-
-          // Heuristic validation: only accept transcripts that look like real captions/subtitles.
-          // Reject very short results or ones that look like metadata-only (title/description synthesis).
-          const isValidTranscript = (text: string) => {
-            if (!text) return false;
-            const trimmed = text.trim();
-            if (trimmed.length < 50) return false; // too short to be a real transcript
-            // prefer transcripts with line breaks (common in captions) or enough words
-            if (trimmed.includes("\n") || trimmed.split(/\s+/).length > 20)
-              return true;
-            return false;
-          };
-
-          hasValidTranscript = isValidTranscript(transcriptText);
-          transcriptSource = hasValidTranscript
-            ? "youtube_native"
-            : "youtube_invalid";
-
-          if (hasValidTranscript) {
-            logger.info(
-              `✅ [TIER 2 SUCCESS] YouTube native transcript for video ${video.videoId} (${transcriptText.length} characters)`
-            );
-          }
-        } catch (youtubeError) {
-          logger.warn(
-            `⚠️ [TIER 2 FAILED] YouTube native methods failed for video ${
-              video.videoId
-            }: ${(youtubeError as Error).message}`
-          );
-        }
-      }
-
-      // FALLBACK 2: Try Supadata Direct if available
-      if (!hasValidTranscript) {
-        logger.info(
-          `🔄 [TIER 3] Trying Supadata Direct for video ${video.videoId}`
-        );
-
-        if (supadataService.isConfigured()) {
-          try {
-            const supadataResult: any =
-              await supadataService.getVideoTranscript(video.videoId);
-            if (
-              supadataResult &&
-              typeof supadataResult === "object" &&
-              "transcript" in supadataResult
-            ) {
-              transcriptText = supadataResult.transcript;
-              hasValidTranscript =
-                transcriptText && transcriptText.trim().length >= 50;
-              transcriptSource = "supadata_direct";
-              logger.info(
-                `✅ [TIER 3 SUCCESS] Supadata Direct transcript for video ${video.videoId} (${transcriptText.length} characters)`
-              );
-            }
-          } catch (supadataDirectError) {
-            logger.warn(
-              `⚠️ [TIER 3 FAILED] Supadata Direct failed for video ${
-                video.videoId
-              }: ${(supadataDirectError as Error).message}`
-            );
-          }
-        }
-      }
-
-      // If we still don't have a valid transcript, record as pending
+      // If we don't have a valid transcript, record as pending
       if (!hasValidTranscript) {
         logger.warn(
           `❌ [NO TRANSCRIPT] No usable transcript found for video ${video.videoId} from any source. Recording as pending.`
@@ -1136,9 +1036,7 @@ class FinfluencerTracker {
       let analysisSuccess = false;
 
       try {
-        logger.info(
-          `🧠 Starting AI analysis for video ${video.videoId} (source: ${transcriptSource})`
-        );
+        logger.info(`🧠 Starting AI analysis for video ${video.videoId}`);
         analysis = await globalAIAnalyzer.analyzeTranscript(transcriptText, {
           videoId: video.videoId,
           title: video.title,
@@ -1161,7 +1059,7 @@ class FinfluencerTracker {
         ) {
           analysisSuccess = true;
           reportingService.incrementTranscriptsFetched(
-            transcriptSource,
+            "youtube_service",
             transcriptText.length
           );
           reportingService.incrementAIProcessed();
@@ -1245,7 +1143,6 @@ class FinfluencerTracker {
       }
 
       logger.info(`✅ Successfully processed video: ${video.videoId}`, {
-        transcriptSource: transcriptSource,
         transcriptLength: transcriptText.length,
         predictionsFound: analysis?.predictions?.length || 0,
         modifications: analysis?.ai_modifications?.length || 0,

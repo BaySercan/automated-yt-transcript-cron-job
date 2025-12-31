@@ -1,4 +1,4 @@
-# Automated YouTube Transcript Generator v2.0.19
+# Automated YouTube Transcript Generator v2.0.20
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
@@ -7,28 +7,32 @@ A Dockerized microservice designed to run as a daily cron job that analyzes YouT
 The cron job automatically:
 
 1. Fetches active YouTube channel IDs from a Supabase table
-2. Retrieves new videos since each channel's last check date
-3. Downloads video transcripts using a **3-tier fallback system**
-4. Validates transcript quality (minimum 50 characters, real captions)
-5. Analyzes transcripts using AI models hosted on OpenRouter
-6. Parses structured JSON output and saves to Supabase
-7. **Automatically retries failed predictions during idle time**
-8. **Fetches historical asset prices with persistent caching & multi-provider fallback**
-9. **Verifies predictions against actual market data with strict horizon enforcement**
-10. **Generates comprehensive run reports saved to database**
-11. Runs nightly at 23:30 (Europe/Istanbul, UTC+3)
+2. Retrieves new videos since each channel's last check date (using optimized `playlistItems.list` API)
+3. **Detects and processes any missed videos** (gap detection from START_DATE)
+4. Downloads video transcripts using a **3-tier fallback system**
+5. Validates transcript quality (minimum 50 characters, real captions)
+6. Analyzes transcripts using AI models hosted on OpenRouter
+7. Parses structured JSON output and saves to Supabase
+8. **Automatically retries failed predictions during idle time**
+9. **Fetches historical asset prices with persistent caching & multi-provider fallback**
+10. **Verifies predictions against actual market data with strict horizon enforcement**
+11. **Generates comprehensive run reports saved to database**
+12. Runs nightly at 23:30 (Europe/Istanbul, UTC+3)
 
 ## ✨ Key Features
 
 ### Core Functionality
 
 - **🔄 Intelligent Retry Service**: Automatic recovery mechanism for failed predictions
-- **📊 Comprehensive Reporting**: Detailed JSON run reports saved to `run_reports` table
+- **� Gap Detection**: Finds and processes videos missed during previous fetches
+- **⚡ Optimized YouTube API**: Uses `playlistItems.list` (1 unit) instead of `search.list` (100 units)
+- **�📊 Comprehensive Reporting**: Detailed JSON run reports saved to `run_reports` table
 - **🖥️ Beautiful CLI**: Color-coded, table-formatted console output for local debugging
 - **🤖 AI-Powered Analysis**: Multiple AI model support via OpenRouter
 - **🛡️ Robust Error Handling**: Graceful degradation and recovery mechanisms
 - **⚡ Performance Optimized**: Memory-efficient processing with adaptive polling
 - **🎯 Transcript Validation**: Heuristic validation to ensure real captions/subtitles
+- **♾️ Unlimited Processing**: All processes loop until ALL records are processed (no artificial limits)
 
 ### Transcript Fetching (3-Tier Fallback System)
 
@@ -170,6 +174,19 @@ The service now uses a **Persistent Cache Strategy**:
 4. **Save to Cache**: Successfully fetched prices are saved to `asset_prices` for future use (forever).
 
 ## 🔄 Recent Updates
+
+### v2.0.19 - API Optimization & Complete Processing
+
+- ✅ **YouTube API Optimization**: Uses `playlistItems.list` (1 unit) instead of `search.list` (100 units) - **99% cost reduction**
+- ✅ **Unlimited Processing**: All processes now run without artificial limits:
+  - Combined predictions: Loops until ALL records processed (batches of 500)
+  - Prediction verification: Loops until ALL horizon-passed predictions verified
+  - Retry service: Processes ALL pending records
+- ✅ **Gap Detection**: New `detectAndProcessMissedVideos()` finds and processes videos missed in previous runs
+  - Compares YouTube videos (since START_DATE) with database
+  - Automatically catches videos skipped due to rate limits, network issues, etc.
+- ✅ **Early Stopping**: YouTube video fetching stops when hitting videos older than cutoff date
+- ✅ **Automatic Fallback**: Falls back to `search.list` if `playlistItems.list` fails
 
 ### v2.0.18 - Transcript System Improvements
 
