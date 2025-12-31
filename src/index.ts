@@ -56,8 +56,11 @@ class FinfluencerTracker {
       // Test all connections
       await this.testConnections();
 
-      // Process all active channels
+      // Process all active channels (new videos since last_checked_at)
       await this.processAllChannels();
+
+      // GAP DETECTION: Check for missed videos since START_DATE
+      await this.detectAndProcessMissedVideos();
 
       // Process failed predictions (idle-time retry)
       await this.processFailedPredictions();
@@ -302,6 +305,128 @@ class FinfluencerTracker {
     }
   }
 
+  // GAP DETECTION: Detect and process videos that were missed during previous fetches
+  // Compares all videos from YouTube (since START_DATE) with what's in the database
+  private async detectAndProcessMissedVideos(): Promise<void> {
+    try {
+      logger.info("🔍 Starting gap detection for missed videos...");
+
+      const channels = await supabaseService.getActiveChannels();
+      const startDate = new Date(config.startDate);
+      let totalMissed = 0;
+      let totalProcessed = 0;
+
+      for (const channel of channels) {
+        if (this.isShuttingDown) break;
+
+        try {
+          // 1. Get ALL videos from YouTube since START_DATE
+          const allYouTubeVideos = await youtubeService.getChannelVideos(
+            channel.channel_id.trim(),
+            startDate
+          );
+
+          if (allYouTubeVideos.length === 0) {
+            continue;
+          }
+
+          // 2. Get all video IDs we have in the database for this channel
+          const { data: dbVideos, error } = await supabaseService
+            .getClient()
+            .from("finfluencer_predictions")
+            .select("video_id")
+            .eq("channel_id", channel.channel_id);
+
+          if (error) {
+            logger.error(
+              `Failed to fetch DB videos for ${channel.channel_name}`,
+              { error }
+            );
+            continue;
+          }
+
+          const dbVideoIds = new Set(dbVideos?.map((v) => v.video_id) || []);
+
+          // 3. Find videos that exist on YouTube but not in our database
+          const missedVideos = allYouTubeVideos.filter(
+            (video) => !dbVideoIds.has(video.videoId)
+          );
+
+          if (missedVideos.length === 0) {
+            logger.debug(
+              `✅ No missed videos for ${channel.channel_name} (${allYouTubeVideos.length} videos checked)`
+            );
+            continue;
+          }
+
+          logger.warn(
+            `⚠️ Found ${missedVideos.length} missed videos for ${channel.channel_name}`,
+            {
+              channelId: channel.channel_id,
+              totalYouTube: allYouTubeVideos.length,
+              totalDB: dbVideoIds.size,
+              missedCount: missedVideos.length,
+            }
+          );
+
+          totalMissed += missedVideos.length;
+
+          // 4. Process each missed video
+          for (const video of missedVideos) {
+            if (this.isShuttingDown) break;
+
+            try {
+              logger.info(
+                `🔄 Processing missed video: ${video.title} (${video.videoId})`,
+                {
+                  publishedAt: video.publishedAt,
+                  channelName: channel.channel_name,
+                }
+              );
+
+              // Use the existing processVideo function
+              await this.processVideo(video, channel);
+              totalProcessed++;
+
+              // Track in reporting
+              reportingService.incrementVideosProcessed();
+
+              // Rate limiting delay
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+            } catch (videoError) {
+              logger.error(`Failed to process missed video ${video.videoId}`, {
+                error: videoError,
+              });
+              this.stats.errors++;
+            }
+          }
+        } catch (channelError) {
+          logger.error(
+            `Gap detection failed for channel ${channel.channel_name}`,
+            { error: channelError }
+          );
+        }
+
+        // Delay between channels
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      if (totalMissed > 0) {
+        logger.info(`✅ Gap detection completed`, {
+          totalMissedFound: totalMissed,
+          totalProcessed,
+          totalFailed: totalMissed - totalProcessed,
+        });
+      } else {
+        logger.info("✅ Gap detection completed - no missed videos found");
+      }
+    } catch (error) {
+      logger.error("❌ Gap detection failed", { error });
+      this.stats.errors++;
+      // Don't throw - gap detection failures shouldn't stop the main process
+    }
+  }
+
   // Process failed predictions during idle time
   private async processFailedPredictions(): Promise<void> {
     try {
@@ -497,47 +622,144 @@ class FinfluencerTracker {
   }
 
   // Process combined predictions with AI enrichment and price data
+  // REFACTORED: Now loops until ALL records are processed (no artificial limit)
   private async processCombinedPredictions(): Promise<void> {
     try {
-      logger.info("🔀 Starting combined predictions processing");
+      logger.info("🔀 Starting combined predictions processing (ALL records)");
 
-      const result = await combinedPredictionsService.processPredictions({
-        limit: 500,
-        skipPrice: false,
-        dryRun: false,
-        concurrency: 3,
-        retryCount: 3,
-        requestId: `cron_${Date.now()}`,
-      });
+      const BATCH_SIZE = 500; // Process in batches of 500
+      let totalProcessed = 0;
+      let totalInserted = 0;
+      let totalSkipped = 0;
+      let totalErrors = 0;
+      let totalPricesFetched = 0;
+      let batchNumber = 0;
+      let hasMoreRecords = true;
 
-      logger.info("✅ Combined predictions processing completed", {
-        processedRecords: result.processed_records,
-        inserted: result.inserted,
-        skipped: result.skipped,
-        errors: result.errors,
-        pricesFetched: result.prices_fetched,
-        requestId: result.request_id,
-      });
+      // Loop until all unprocessed predictions are handled
+      while (hasMoreRecords) {
+        batchNumber++;
+        const batchRequestId = `cron_${Date.now()}_batch${batchNumber}`;
+
+        logger.info(`📦 Processing combined predictions batch ${batchNumber}`, {
+          batchSize: BATCH_SIZE,
+        });
+
+        const result = await combinedPredictionsService.processPredictions({
+          limit: BATCH_SIZE,
+          skipPrice: false,
+          dryRun: false,
+          concurrency: 3,
+          retryCount: 3,
+          requestId: batchRequestId,
+        });
+
+        totalProcessed += result.processed_records;
+        totalInserted += result.inserted;
+        totalSkipped += result.skipped;
+        totalErrors += result.errors;
+        totalPricesFetched += result.prices_fetched;
+
+        logger.info(`✅ Batch ${batchNumber} completed`, {
+          batchProcessed: result.processed_records,
+          batchInserted: result.inserted,
+          runningTotal: totalProcessed,
+        });
+
+        // If we processed fewer records than batch size, we're done
+        if (result.processed_records < BATCH_SIZE) {
+          hasMoreRecords = false;
+        }
+
+        // Small delay between batches to avoid overwhelming the system
+        if (hasMoreRecords) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+
+      logger.info(
+        "✅ Combined predictions processing completed (ALL batches)",
+        {
+          batches: batchNumber,
+          totalProcessed,
+          totalInserted,
+          totalSkipped,
+          totalErrors,
+          totalPricesFetched,
+        }
+      );
 
       // Update statistics
-      this.stats.processed_videos += result.inserted; // Count newly inserted predictions
+      this.stats.processed_videos += totalInserted;
 
-      // After inserting combined predictions, reconcile horizon-passed records (no AI by default)
-      try {
-        await combinedPredictionsService.reconcilePredictions({
-          limit: 10000, // Increased from 500 to process more predictions
-          dryRun: false,
-          retryCount: 3,
-          useAI: false,
-          requestId: `reconcile_${Date.now()}`,
-        });
-      } catch (err) {
-        logger.warn("Failed to reconcile combined predictions", { error: err });
-      }
+      // RECONCILIATION: Loop until ALL pending predictions are verified
+      await this.reconcileAllPredictions();
     } catch (error) {
       logger.error("❌ Combined predictions processing failed", { error });
       this.stats.errors++;
       // Don't throw - this shouldn't stop the main process
+    }
+  }
+
+  // Reconcile ALL horizon-passed predictions (no artificial limit)
+  private async reconcileAllPredictions(): Promise<void> {
+    try {
+      logger.info("🔍 Starting prediction reconciliation (ALL records)");
+
+      const BATCH_SIZE = 500;
+      let batchNumber = 0;
+      let totalReconciled = 0;
+      let hasMoreRecords = true;
+
+      while (hasMoreRecords) {
+        batchNumber++;
+
+        // Reconcile doesn't return count, so we check via a query
+        // We'll run reconcile and if it processes less than batch size, we stop
+        await combinedPredictionsService.reconcilePredictions({
+          limit: BATCH_SIZE,
+          dryRun: false,
+          retryCount: 3,
+          useAI: false,
+          requestId: `reconcile_${Date.now()}_batch${batchNumber}`,
+        });
+
+        // Check if there are more pending predictions to process
+        const { data: remaining } = await supabaseService
+          .getClient()
+          .from("combined_predictions")
+          .select("id", { count: "exact", head: true })
+          .eq("status", "pending")
+          .lt("horizon_end_date", new Date().toISOString());
+
+        const remainingCount = remaining?.length ?? 0;
+
+        logger.info(`🔍 Reconciliation batch ${batchNumber} completed`, {
+          remainingEligible: remainingCount,
+        });
+
+        // If no more eligible records, stop
+        if (remainingCount === 0) {
+          hasMoreRecords = false;
+        }
+
+        // Safety: limit total batches to prevent infinite loops
+        if (batchNumber >= 100) {
+          logger.warn("⚠️ Reached max reconciliation batches (100), stopping");
+          hasMoreRecords = false;
+        }
+
+        // Small delay between batches
+        if (hasMoreRecords) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+
+      logger.info("✅ Prediction reconciliation completed (ALL batches)", {
+        totalBatches: batchNumber,
+      });
+    } catch (err) {
+      logger.warn("Failed to reconcile combined predictions", { error: err });
     }
   }
 

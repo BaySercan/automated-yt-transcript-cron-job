@@ -123,6 +123,8 @@ export class YouTubeService {
   }
 
   // Get videos from channel since specific date (optionally until another date)
+  // OPTIMIZED: Uses playlistItems.list (1 unit) instead of search.list (100 units)
+  // Falls back to search.list if playlistItems fails
   async getChannelVideos(
     channelId: string,
     publishedAfter: Date,
@@ -133,10 +135,156 @@ export class YouTubeService {
     }
 
     try {
+      // Try optimized playlistItems.list first (1 unit per call)
+      const videos = await this.getChannelVideosViaPlaylist(
+        channelId,
+        publishedAfter,
+        publishedBefore
+      );
+      return videos;
+    } catch (playlistError) {
+      // Log the error and fall back to search.list
+      logger.warn(
+        `⚠️ playlistItems.list failed for channel ${channelId}, falling back to search.list`,
+        { error: (playlistError as Error).message }
+      );
+      return this.getChannelVideosViaSearch(
+        channelId,
+        publishedAfter,
+        publishedBefore
+      );
+    }
+  }
+
+  // OPTIMIZED: Get videos using playlistItems.list (1 unit per call)
+  // Converts channel ID to uploads playlist ID and fetches with early stopping
+  private async getChannelVideosViaPlaylist(
+    channelId: string,
+    publishedAfter: Date,
+    publishedBefore?: Date
+  ): Promise<YouTubeVideo[]> {
+    // Convert channel ID (UC...) to uploads playlist ID (UU...)
+    const uploadsPlaylistId = this.getUploadsPlaylistId(channelId);
+    const videos: YouTubeVideo[] = [];
+    let nextPageToken: string | undefined = undefined;
+    let apiCalls = 0;
+
+    logger.info(
+      `📋 [OPTIMIZED] Fetching videos via playlistItems.list for channel ${channelId}`
+    );
+
+    do {
+      apiCalls++;
+      await this.rateLimiter.wait();
+
+      const response = await this.youtube.playlistItems.list({
+        part: ["snippet", "contentDetails"],
+        playlistId: uploadsPlaylistId,
+        maxResults: 50, // Maximum allowed
+        pageToken: nextPageToken,
+      });
+
+      if (response.status !== 200) {
+        throw new YouTubeServiceError(
+          `Failed to fetch playlist items: HTTP ${response.status}`,
+          { code: response.status }
+        );
+      }
+
+      const items = response.data.items;
+      if (!items || items.length === 0) break;
+
+      // Process items and filter by date
+      const videoIds: string[] = [];
+      let stoppedEarly = false;
+
+      for (const item of items) {
+        const contentDetails = item.contentDetails;
+        const snippet = item.snippet;
+
+        // Get the video's publish date
+        const publishedAt =
+          contentDetails?.videoPublishedAt || snippet?.publishedAt;
+        if (!publishedAt) continue;
+
+        const videoDate = new Date(publishedAt);
+
+        // Check if video is older than our cutoff - stop early!
+        if (videoDate < publishedAfter) {
+          logger.debug(
+            `⏹️ Hit video older than cutoff (${publishedAt}), stopping pagination`
+          );
+          stoppedEarly = true;
+          break;
+        }
+
+        // Check if video is newer than publishedBefore (if specified)
+        if (publishedBefore && videoDate > publishedBefore) {
+          continue; // Skip this video but don't stop
+        }
+
+        const videoId = contentDetails?.videoId;
+        if (videoId) {
+          videoIds.push(videoId);
+        }
+      }
+
+      // Get detailed info for matching videos
+      if (videoIds.length > 0) {
+        const detailedVideos = await this.getVideoDetails(videoIds);
+        videos.push(...detailedVideos);
+      }
+
+      // If we hit older videos, no need to fetch more pages
+      if (stoppedEarly) {
+        logger.info(
+          `✅ [OPTIMIZED] Stopped early after ${apiCalls} API call(s), found ${videos.length} videos`
+        );
+        break;
+      }
+
+      nextPageToken = response.data.nextPageToken || undefined;
+
+      // Safety limit: Don't fetch more than 10 pages (500 videos)
+      if (apiCalls >= 10) {
+        logger.warn(`⚠️ Reached max pages (10) for channel ${channelId}`);
+        break;
+      }
+    } while (nextPageToken);
+
+    logger.info(
+      `📋 [OPTIMIZED] Fetched ${videos.length} videos for channel ${channelId} using ${apiCalls} API call(s) (${apiCalls} units)`
+    );
+    return videos;
+  }
+
+  // Convert channel ID to uploads playlist ID
+  // YouTube channel IDs start with "UC", uploads playlist IDs start with "UU"
+  private getUploadsPlaylistId(channelId: string): string {
+    if (channelId.startsWith("UC")) {
+      return "UU" + channelId.slice(2);
+    }
+    throw new YouTubeServiceError(
+      `Invalid channel ID format for playlist conversion: ${channelId}`
+    );
+  }
+
+  // LEGACY: Get videos using search.list (100 units per call)
+  // Kept as fallback in case playlistItems fails
+  private async getChannelVideosViaSearch(
+    channelId: string,
+    publishedAfter: Date,
+    publishedBefore?: Date
+  ): Promise<YouTubeVideo[]> {
+    try {
       const videos: YouTubeVideo[] = [];
       let nextPageToken: string | undefined = undefined;
       const publishedAfterISO = publishedAfter.toISOString();
       const publishedBeforeISO = publishedBefore?.toISOString();
+
+      logger.info(
+        `🔍 [LEGACY] Fetching videos via search.list for channel ${channelId} (100 units/call)`
+      );
 
       do {
         await this.rateLimiter.wait();
@@ -179,7 +327,7 @@ export class YouTubeService {
       } while (nextPageToken);
 
       logger.info(
-        `Fetched ${videos.length} videos for channel ${channelId} since ${publishedAfterISO}`
+        `🔍 [LEGACY] Fetched ${videos.length} videos for channel ${channelId} since ${publishedAfterISO}`
       );
       return videos;
     } catch (error) {
