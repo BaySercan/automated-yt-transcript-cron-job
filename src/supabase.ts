@@ -3,9 +3,11 @@ import { config } from "./config";
 import { FinfluencerChannel, FinfluencerPrediction } from "./types";
 import { DatabaseError } from "./errors";
 import { logger, retryWithBackoff } from "./utils";
+import { AvatarService } from "./services/avatarService";
 
 export class SupabaseService {
   private client: SupabaseClient;
+  private avatarService: AvatarService;
 
   constructor() {
     this.client = createClient(config.supabaseUrl, config.supabaseServiceKey, {
@@ -14,6 +16,7 @@ export class SupabaseService {
         persistSession: false,
       },
     });
+    this.avatarService = new AvatarService(this.client);
   }
 
   // Expose client for direct query operations when needed
@@ -119,15 +122,33 @@ export class SupabaseService {
     }
   }
 
-  // Update channel info (snippet, statistics)
+  // Update channel info (snippet, statistics) and avatar
   async updateChannelInfo(channelId: string, info: any): Promise<void> {
     try {
+      // Upload avatar to Supabase Storage
+      const thumbnailUrl = AvatarService.getHighResThumbnail(info);
+      let avatarUrl: string | null = null;
+
+      if (thumbnailUrl) {
+        avatarUrl = await this.avatarService.uploadAvatar(
+          channelId,
+          thumbnailUrl
+        );
+      }
+
+      // Update channel info and avatar URL
+      const updateData: any = {
+        channel_info: info,
+        channel_info_update_date: new Date().toISOString(),
+      };
+
+      if (avatarUrl) {
+        updateData.avatar_url = avatarUrl;
+      }
+
       const { error } = await this.client
         .from("finfluencer_channels")
-        .update({
-          channel_info: info,
-          channel_info_update_date: new Date().toISOString(),
-        })
+        .update(updateData)
         .eq("channel_id", channelId);
 
       if (error) {
@@ -137,7 +158,11 @@ export class SupabaseService {
         );
       }
 
-      logger.info(`Updated channel info for ${channelId}`);
+      logger.info(
+        `Updated channel info for ${channelId}${
+          avatarUrl ? " (avatar updated)" : ""
+        }`
+      );
     } catch (error) {
       logger.error(`Error updating channel info for ${channelId}`, { error });
       throw error;
