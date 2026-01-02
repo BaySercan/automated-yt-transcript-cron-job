@@ -1456,6 +1456,133 @@ Respond with ONLY the JSON object, no other text.`;
       ? (normalized as "correct" | "wrong" | "inconclusive")
       : "inconclusive";
   }
+
+  /**
+   * Calculate or verify target price using AI
+   *
+   * Two modes:
+   * 1. calculatedTarget is null → AI calculates target from prediction text
+   * 2. calculatedTarget provided → AI verifies if calculation is correct
+   */
+  async calculateTargetPriceWithAI(data: {
+    predictionText: string;
+    entryPrice: number;
+    asset: string;
+    sentiment: string;
+    calculatedTarget: number | null;
+    calculationMethod: string | null;
+  }): Promise<{
+    targetPrice: number | null;
+    confidence: "high" | "medium" | "low";
+    reasoning: string;
+    agreedWithCalculation: boolean | null;
+    model: string;
+  }> {
+    const model = this.getModelName();
+
+    const verificationMode = data.calculatedTarget !== null;
+
+    const prompt = verificationMode
+      ? `You are a financial prediction analyst. Verify if this target price calculation is correct.
+
+## PREDICTION DATA:
+- Asset: ${data.asset}
+- Sentiment: ${data.sentiment}
+- Entry Price: $${data.entryPrice}
+- Prediction Text: "${data.predictionText}"
+
+## MY CALCULATION:
+- Calculated Target Price: $${data.calculatedTarget}
+- Method: ${data.calculationMethod}
+
+## YOUR TASK:
+1. Is my calculated target price correct based on the prediction text?
+2. If not, what should the target price be?
+3. If no target can be determined, return null.
+
+## RESPONSE FORMAT (JSON only):
+{
+  "agrees_with_calculation": true/false,
+  "target_price": <number or null>,
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "Brief explanation"
+}
+
+Respond with ONLY the JSON object, no other text.`
+      : `You are a financial prediction analyst. Calculate the target price from this prediction.
+
+## PREDICTION DATA:
+- Asset: ${data.asset}
+- Sentiment: ${data.sentiment}
+- Entry Price: $${data.entryPrice}
+- Prediction Text: "${data.predictionText}"
+
+## YOUR TASK:
+1. Analyze the prediction text for any target price indicators:
+   - Explicit prices: "$30", "$50", "$100-$150"
+   - Multipliers: "10x", "20x" → entry_price × multiplier
+   - Percentages: "100%", "200% upside" → entry_price × (1 + percent/100)
+   - Relative: "double", "triple" → entry_price × 2 or 3
+2. Calculate the target price if possible
+3. If no target can be determined, return null
+
+## RESPONSE FORMAT (JSON only):
+{
+  "target_price": <number or null>,
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "Brief explanation of how you calculated the target"
+}
+
+Respond with ONLY the JSON object, no other text.`;
+
+    try {
+      const response = await retryWithBackoff(
+        async () => this.sendRequest(prompt),
+        2,
+        2000
+      );
+
+      const content = this.extractResponseContent(response);
+      if (!content) {
+        return {
+          targetPrice: data.calculatedTarget,
+          confidence: "low",
+          reasoning: "AI calculation failed - using rule-based result",
+          agreedWithCalculation: verificationMode ? true : null,
+          model,
+        };
+      }
+
+      const cleaned = this.cleanJsonResponse(content);
+      const parsed = JSON.parse(cleaned);
+
+      const targetPrice =
+        parsed.target_price !== undefined
+          ? typeof parsed.target_price === "number"
+            ? parsed.target_price
+            : null
+          : null;
+
+      return {
+        targetPrice,
+        confidence: this.validateConfidence(parsed.confidence),
+        reasoning: sanitizeText(parsed.reasoning || "No reasoning provided"),
+        agreedWithCalculation: verificationMode
+          ? parsed.agrees_with_calculation ?? true
+          : null,
+        model,
+      };
+    } catch (error) {
+      logger.warn("AI target price calculation failed", { error });
+      return {
+        targetPrice: data.calculatedTarget,
+        confidence: "low",
+        reasoning: `AI calculation error: ${(error as Error).message}`,
+        agreedWithCalculation: verificationMode ? true : null,
+        model,
+      };
+    }
+  }
 }
 
 export const globalAIAnalyzer = new GlobalAIAnalyzer();

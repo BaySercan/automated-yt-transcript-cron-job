@@ -725,6 +725,151 @@ export class CombinedPredictionsService {
                 : null;
               let currencyConversionMetadata: any = null;
 
+              // ENHANCED: Calculate target price from various expressions in prediction_text
+              // Handles: multipliers (10x), percentages (100%), price ranges ($30-$50)
+              // Only if targetPrice is null but we have entry price
+              if (
+                (targetPrice === null || targetPrice === undefined) &&
+                entryPrice !== null &&
+                p.prediction_text
+              ) {
+                const text = p.prediction_text;
+                const entryNum = parseFloat(entryPrice);
+                let calculatedTarget: number | null = null;
+                let detectionMethod: string | null = null;
+                let matchedText: string | null = null;
+
+                // 1. Check for multipliers: "10x", "20x", "5.5x"
+                const multiplierMatch = text.match(/(\d+(?:\.\d+)?)\s*x\b/i);
+                if (multiplierMatch) {
+                  const multiplier = parseFloat(multiplierMatch[1]);
+                  if (multiplier >= 2 && multiplier <= 100) {
+                    calculatedTarget = entryNum * multiplier;
+                    detectionMethod = "multiplier";
+                    matchedText = multiplierMatch[0];
+                  }
+                }
+
+                // 2. Check for percentages: "100%", "200%", "50% upside"
+                if (!calculatedTarget) {
+                  const percentMatch = text.match(/(\d+(?:\.\d+)?)\s*%/);
+                  if (percentMatch) {
+                    const percent = parseFloat(percentMatch[1]);
+                    // Only for significant upside percentages (10-1000%)
+                    if (percent >= 10 && percent <= 1000) {
+                      calculatedTarget = entryNum * (1 + percent / 100);
+                      detectionMethod = "percentage";
+                      matchedText = percentMatch[0];
+                    }
+                  }
+                }
+
+                // 3. Check for explicit price targets: "$30", "$50", "$100-$150"
+                if (!calculatedTarget) {
+                  // Match price ranges like "$30, $40, $50" or "$100-$150" or "up to $100"
+                  const priceMatches = text.match(
+                    /\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g
+                  );
+                  if (priceMatches && priceMatches.length > 0) {
+                    // Extract all numbers
+                    const prices = priceMatches.map((m) =>
+                      parseFloat(m.replace(/[$,]/g, ""))
+                    );
+                    // Filter to reasonable prices (within 10x of entry, above $1)
+                    const validPrices = prices.filter(
+                      (p) => p > 1 && p < entryNum * 100 && p > entryNum * 0.1
+                    );
+                    if (validPrices.length > 0) {
+                      // Use highest price as target (most optimistic)
+                      calculatedTarget = Math.max(...validPrices);
+                      detectionMethod = "price_range";
+                      matchedText = priceMatches.join(", ");
+                    }
+                  }
+                }
+
+                // 4. Check for "double", "triple" expressions
+                if (!calculatedTarget) {
+                  if (/\bdouble\b/i.test(text)) {
+                    calculatedTarget = entryNum * 2;
+                    detectionMethod = "double";
+                    matchedText = "double";
+                  } else if (/\btriple\b/i.test(text)) {
+                    calculatedTarget = entryNum * 3;
+                    detectionMethod = "triple";
+                    matchedText = "triple";
+                  }
+                }
+
+                // 5. AI Verification/Calculation
+                // Always ask AI to verify our calculation or calculate if we couldn't
+                try {
+                  const aiResult =
+                    await globalAIAnalyzer.calculateTargetPriceWithAI({
+                      predictionText: text,
+                      entryPrice: entryNum,
+                      asset,
+                      sentiment: p.sentiment || "neutral",
+                      calculatedTarget,
+                      calculationMethod: detectionMethod,
+                    });
+
+                  if (aiResult.targetPrice !== null) {
+                    // Use AI's target price (either verified or newly calculated)
+                    calculatedTarget = aiResult.targetPrice;
+                    detectionMethod =
+                      calculatedTarget === aiResult.targetPrice
+                        ? `${detectionMethod || "none"}_ai_verified`
+                        : "ai_calculated";
+
+                    this.log(
+                      "info",
+                      `AI ${
+                        aiResult.agreedWithCalculation === false
+                          ? "corrected"
+                          : "verified/calculated"
+                      } target price for ${asset}`,
+                      {
+                        videoId,
+                        asset,
+                        aiTargetPrice: aiResult.targetPrice,
+                        confidence: aiResult.confidence,
+                        reasoning: aiResult.reasoning,
+                        agreedWithCalculation: aiResult.agreedWithCalculation,
+                        model: aiResult.model,
+                      }
+                    );
+                  }
+                } catch (aiErr) {
+                  this.log(
+                    "warn",
+                    `AI target price calculation failed for ${asset}`,
+                    {
+                      error: this.safeErrorMessage(aiErr),
+                    }
+                  );
+                  // Continue with rule-based result if AI fails
+                }
+
+                // Apply calculated target (from hardcoded or AI)
+                if (calculatedTarget !== null) {
+                  targetPrice = calculatedTarget;
+                  targetPriceInAssetCurrency = calculatedTarget;
+                  this.log(
+                    "info",
+                    `Final target price from ${detectionMethod} for ${asset}`,
+                    {
+                      videoId,
+                      asset,
+                      detectionMethod,
+                      entryPrice,
+                      calculatedTarget,
+                      matchedText,
+                    }
+                  );
+                }
+              }
+
               if (targetPrice !== null && targetPrice !== undefined) {
                 // If no currency was explicitly declared, use the asset's default currency
                 if (!targetPriceCurrency) {
