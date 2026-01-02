@@ -1,4 +1,4 @@
-# Automated YouTube Transcript Generator v2.0.21
+# Automated YouTube Transcript Generator v2.0.22
 
 A Dockerized microservice designed to run as a daily cron job that analyzes YouTube "finfluencer" videos for financial predictions and saves structured results to Supabase.
 
@@ -73,7 +73,8 @@ The transcript generation system uses a resilient **3-tier architecture** with a
 
   - **Target Price Priority**: Checks specific price targets first
   - **Sentiment Thresholds**: Asset-type-specific percentage requirements
-  - **Horizon Enforcement**: Explicitly marks predictions as "Wrong" if horizon date passes without target validation
+  - **Tiered Thresholds**: Short-term 0.5x stricter, long-term 1.5x lenient
+  - **Horizon Enforcement**: 90-day minimum for vague horizons, multilingual date parsing
 
 - **🌍 International Market Support**:
   - **BIST 100** (Istanbul): `XU100.IS` (Yahoo) → `^xutry` (Stooq)
@@ -120,7 +121,8 @@ The transcript generation system uses a resilient **3-tier architecture** with a
  │  ├─ yahooService.ts           # Yahoo Finance integration (3-day window)
  │  ├─ twelveDataService.ts      # Twelve Data integration (XAUTRYG)
  │  ├─ stooqService.ts           # Stooq.com fallback service (retry logic)
- │  └─ usagoldService.ts         # USAGOLD integration for precious metals
+ │  ├─ usagoldService.ts         # USAGOLD integration for precious metals
+ │  └─ predictionAuditService.ts # Audit tool for prediction quality checks
  └─ version.ts                   # Version management and build information
 ```
 
@@ -174,6 +176,16 @@ The service now uses a **Persistent Cache Strategy**:
 4. **Save to Cache**: Successfully fetched prices are saved to `asset_prices` for future use (forever).
 
 ## 🔄 Recent Updates
+
+### v2.0.22 - Prediction Verification Improvements
+
+- ✅ **Multilingual Horizon Parsing**: Supports 7 languages (EN, TR, ES, DE, FR, PT, IT)
+- ✅ **90-Day Minimum Horizon**: Vague expressions ("yakında", "kısa vadede") get minimum verification window
+- ✅ **Year Expressions**: Properly handles "gelecek yıl", "2026", "next year" → full calendar year
+- ✅ **Multi-Month Parsing**: "ocak, şubat aylarında" → end of last mentioned month
+- ✅ **Tiered Thresholds**: Short (<30d) 0.5x, Medium (30-180d) 1x, Long (>180d) 1.5x
+- ✅ **Prediction Audit Service**: New tool to identify and reset problematic records
+- ✅ **Database Audit**: Reset 74 prematurely-closed long-term predictions
 
 ### v2.0.19 - API Optimization & Complete Processing
 

@@ -26,6 +26,10 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
-  "include": ["src/**/*"],
+  "include": [
+    "src/**/*",
+    "scripts/predictionAuditService.ts",
+    "scripts/predictionChecker.ts"
+  ],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts", "scripts"]
 }

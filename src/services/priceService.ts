@@ -1526,6 +1526,11 @@ export class PriceService {
   /**
    * Calculate horizon date range based on post date and horizon value
    * Returns a start and end date for the verification window
+   *
+   * Enhanced to handle:
+   * - Turkish year expressions: "gelecek yıl", "önümüzdeki yıl", "2026"
+   * - Multi-month expressions: "ocak, şubat aylarında" → end of last month
+   * - Minimum 90-day horizon for unknown/vague expressions
    */
   calculateHorizonDateRange(
     postDate: Date,
@@ -1537,35 +1542,181 @@ export class PriceService {
     const value = horizonValue.toLowerCase().trim();
     const type = horizonType.toLowerCase();
 
+    // Month name arrays for pattern matching (multilingual)
+    const months = [
+      "jan",
+      "feb",
+      "mar",
+      "apr",
+      "may",
+      "jun",
+      "jul",
+      "aug",
+      "sep",
+      "oct",
+      "nov",
+      "dec",
+    ];
+
+    // Multilingual month mappings: name -> month index (0-11)
+    // Only unique keys - duplicates across languages removed
+    const monthToIndex: { [key: string]: number } = {
+      // English (full and abbreviated)
+      january: 0,
+      february: 1,
+      march: 2,
+      april: 3,
+      may: 4,
+      june: 5,
+      july: 6,
+      august: 7,
+      september: 8,
+      october: 9,
+      november: 10,
+      december: 11,
+      jan: 0,
+      feb: 1,
+      mar: 2,
+      apr: 3,
+      jun: 5,
+      jul: 6,
+      aug: 7,
+      sep: 8,
+      oct: 9,
+      nov: 10,
+      dec: 11,
+      // Turkish
+      ocak: 0,
+      subat: 1,
+      şubat: 1,
+      mart: 2,
+      nisan: 3,
+      mayis: 4,
+      mayıs: 4,
+      haziran: 5,
+      temmuz: 6,
+      agustos: 7,
+      ağustos: 7,
+      eylul: 8,
+      eylül: 8,
+      ekim: 9,
+      kasim: 10,
+      kasım: 10,
+      aralik: 11,
+      aralık: 11,
+      // Spanish (unique to Spanish)
+      enero: 0,
+      febrero: 1,
+      abril: 3,
+      mayo: 4,
+      junio: 5,
+      julio: 6,
+      septiembre: 8,
+      octubre: 9,
+      noviembre: 10,
+      diciembre: 11,
+      // German (unique to German)
+      januar: 0,
+      februar: 1,
+      marz: 2,
+      märz: 2,
+      mai: 4,
+      juni: 5,
+      juli: 6,
+      oktober: 9,
+      dezember: 11,
+      // French (unique to French)
+      janvier: 0,
+      février: 1,
+      fevrier: 1,
+      mars: 2,
+      avril: 3,
+      juillet: 6,
+      août: 7,
+      aout: 7,
+      octobre: 9,
+      décembre: 11,
+      decembre: 11,
+      // Portuguese (unique to Portuguese)
+      janeiro: 0,
+      fevereiro: 1,
+      março: 2,
+      marco: 2,
+      maio: 4,
+      junho: 5,
+      julho: 6,
+      setembro: 8,
+      outubro: 9,
+      novembro: 10,
+      dezembro: 11,
+      // Italian (unique to Italian)
+      gennaio: 0,
+      febbraio: 1,
+      aprile: 3,
+      maggio: 4,
+      giugno: 5,
+      luglio: 6,
+      settembre: 8,
+      ottobre: 9,
+      // Shared: agosto (Spanish/Portuguese/Italian), marzo (Spanish/Italian), novembre (French/Italian/Portuguese)
+      agosto: 7,
+      marzo: 2,
+      novembre: 10,
+    };
+
     // 1. Exact Date
     if (type === "exact") {
-      // Try to parse the date from value
       const parsed = new Date(value);
       if (!isNaN(parsed.getTime())) {
         return { start: parsed, end: parsed };
       }
     }
 
-    // 2. End of Year
+    // 2. Explicit year reference: "2026", "2027", etc.
+    //    Full calendar year from Jan 1 to Dec 31
+    const explicitYearMatch = value.match(/^(20\d{2})$/);
+    if (explicitYearMatch) {
+      const year = parseInt(explicitYearMatch[1], 10);
+      start.setFullYear(year, 0, 1); // Jan 1
+      end.setFullYear(year, 11, 31); // Dec 31
+      return { start, end };
+    }
+
+    // 3. "Next year" / "gelecek yıl" / "önümüzdeki yıl" patterns
+    //    Full next calendar year
+    if (
+      value.includes("gelecek yil") ||
+      value.includes("gelecek yıl") ||
+      value.includes("önümüzdeki yil") ||
+      value.includes("önümüzdeki yıl") ||
+      value.includes("next year") ||
+      value.includes("coming year")
+    ) {
+      const nextYear = postDate.getFullYear() + 1;
+      start.setFullYear(nextYear, 0, 1); // Jan 1
+      end.setFullYear(nextYear, 11, 31); // Dec 31
+      return { start, end };
+    }
+
+    // 4. End of Year
     if (
       type === "end_of_year" ||
       value.includes("end of year") ||
       value.includes("eoy") ||
-      value.includes("yil sonu")
+      value.includes("yil sonu") ||
+      value.includes("yıl sonu")
     ) {
-      // Start checking from Dec 1st of that year
       end.setMonth(11, 31); // Dec 31st
       start.setFullYear(end.getFullYear(), 11, 1); // Dec 1st
       return { start, end };
     }
 
-    // 3. Quarter
+    // 5. Quarter
     if (
       type === "quarter" ||
       value.includes("quarter") ||
-      value.includes(" çeyrek")
+      value.includes("çeyrek")
     ) {
-      // Check for Q1, Q2, Q3, Q4
       const qMatch = value.match(/q([1-4])/i);
       if (qMatch) {
         const q = parseInt(qMatch[1], 10);
@@ -1574,103 +1725,100 @@ export class PriceService {
           ? parseInt(yearMatch[0], 10)
           : start.getFullYear();
 
-        // Q1: Jan-Mar (0-2), Q2: Apr-Jun (3-5), Q3: Jul-Sep (6-8), Q4: Oct-Dec (9-11)
         const startMonth = (q - 1) * 3;
         start.setFullYear(year, startMonth, 1);
-        end.setFullYear(year, startMonth + 2 + 1, 0); // Last day of the quarter
+        end.setFullYear(year, startMonth + 2 + 1, 0); // Last day of quarter
         return { start, end };
       }
 
       // Default relative quarter (3 months from post date)
       end.setMonth(end.getMonth() + 3);
-      start.setTime(postDate.getTime()); // FIX: Start from postDate, not +2 months
+      start.setTime(postDate.getTime());
       return { start, end };
     }
 
-    // 4. Month
+    // 6. Multi-month expressions: "ocak, şubat aylarında", "January and February"
+    //    Find ALL mentioned months and use end of last one
+    const allMonthsFound: number[] = [];
+    for (const [monthName, monthIndex] of Object.entries(monthToIndex)) {
+      if (value.includes(monthName)) {
+        if (!allMonthsFound.includes(monthIndex as number)) {
+          allMonthsFound.push(monthIndex as number);
+        }
+      }
+    }
+    for (let i = 0; i < 12; i++) {
+      if (value.includes(months[i])) {
+        if (!allMonthsFound.includes(i)) {
+          allMonthsFound.push(i);
+        }
+      }
+    }
+
+    if (allMonthsFound.length > 0) {
+      // Sort to find first and last month
+      allMonthsFound.sort((a, b) => a - b);
+      const firstMonth = allMonthsFound[0];
+      const lastMonth = allMonthsFound[allMonthsFound.length - 1];
+
+      const yearMatch = value.match(/20\d{2}/);
+      let year = yearMatch ? parseInt(yearMatch[0], 10) : start.getFullYear();
+
+      // If first month is in the past relative to postDate, assume next year
+      if (firstMonth < postDate.getMonth() && !yearMatch) {
+        year++;
+      }
+
+      start.setFullYear(year, firstMonth, 1);
+      end.setFullYear(year, lastMonth + 1, 0); // Last day of last month
+      return { start, end };
+    }
+
+    // 7. Single month type
     if (type === "month" || value.includes("month") || value.includes(" ay")) {
-      // Check for named months
-      const months = [
-        "jan",
-        "feb",
-        "mar",
-        "apr",
-        "may",
-        "jun",
-        "jul",
-        "aug",
-        "sep",
-        "oct",
-        "nov",
-        "dec",
-      ];
-      const monthsTr = [
-        "ocak",
-        "subat",
-        "mart",
-        "nisan",
-        "mayis",
-        "haziran",
-        "temmuz",
-        "agustos",
-        "eylul",
-        "ekim",
-        "kasim",
-        "aralik",
-      ];
-
-      let targetMonth = -1;
-      for (let i = 0; i < 12; i++) {
-        if (
-          value.toLowerCase().includes(months[i]) ||
-          value.toLowerCase().includes(monthsTr[i])
-        ) {
-          targetMonth = i;
-          break;
-        }
-      }
-
-      if (targetMonth !== -1) {
-        const yearMatch = value.match(/20\d{2}/);
-        let year = yearMatch ? parseInt(yearMatch[0], 10) : start.getFullYear();
-
-        // If target month is in the past relative to now, assume next year
-        // But here we are calculating relative to postDate.
-        if (targetMonth < start.getMonth() && !yearMatch) {
-          year++;
-        }
-
-        start.setFullYear(year, targetMonth, 1);
-        end.setFullYear(year, targetMonth + 1, 0); // Last day of month
-        return { start, end };
-      }
-
       // Relative month number
       const numberMatch = value.match(/(\d+)/);
       const number = numberMatch ? parseInt(numberMatch[1], 10) : 1;
 
       end.setMonth(end.getMonth() + number);
-      start.setTime(postDate.getTime()); // FIX: Use postDate, not end, to preserve verification window
+      start.setTime(postDate.getTime());
       return { start, end };
     }
 
-    // 5. Default / Relative logic (weeks, days, years)
+    // 8. Default / Relative logic (weeks, days, years)
     const numberMatch = value.match(/(\d+)/);
     const number = numberMatch ? parseInt(numberMatch[1], 10) : 1;
 
-    if (value.includes("year") || value.includes("yil")) {
+    if (
+      value.includes("year") ||
+      value.includes("yil") ||
+      value.includes("yıl")
+    ) {
+      // Explicit number of years ahead
       end.setFullYear(end.getFullYear() + number);
+      start.setTime(postDate.getTime());
+      return { start, end };
     } else if (value.includes("week") || value.includes("hafta")) {
       end.setDate(end.getDate() + number * 7);
-    } else if (value.includes("day") || value.includes("gun")) {
+    } else if (
+      value.includes("day") ||
+      value.includes("gun") ||
+      value.includes("gün")
+    ) {
       end.setDate(end.getDate() + number);
     } else {
-      // Default fallback: 1 month
-      end.setMonth(end.getMonth() + 1);
+      // 9. UNKNOWN/VAGUE HORIZON: Enforce 90-day minimum
+      // This handles expressions like "yükselişin sürebileceği", "yakında", "kısa vadede"
+      const minDays = 90;
+      const daysSincePost = Math.floor(
+        (end.getTime() - postDate.getTime()) / (1000 * 60 * 60 * 24)
+      );
+      if (daysSincePost < minDays) {
+        end.setDate(postDate.getDate() + minDays);
+      }
     }
 
-    // For relative dates/custom text, the window should be from postDate until the end date
-    // This allows verifying if the target was hit ANYTIME during that period
+    // For relative dates/custom text, window starts from postDate
     start.setTime(postDate.getTime());
 
     return { start, end };
@@ -1679,6 +1827,10 @@ export class PriceService {
   /**
    * Verify prediction accuracy across a date range
    * Checks if the target was met on ANY day within the range
+   *
+   * Enhanced with horizon-aware verification:
+   * - Calculates horizon length for tiered thresholds
+   * - Target price alone is sufficient for correct status
    */
   async verifyPredictionWithRange(
     asset: string,
@@ -1700,16 +1852,16 @@ export class PriceService {
       return { status: "pending" };
     }
 
+    // Calculate horizon length in days for tiered thresholds
+    const horizonDays = Math.floor(
+      (horizonEnd.getTime() - horizonStart.getTime()) / (1000 * 60 * 60 * 24)
+    );
+
     // Cap the end date to today (cannot check future prices)
     const checkEnd = horizonEnd > now ? now : horizonEnd;
     const checkStart = horizonStart;
 
     // Iterate through days in range (daily resolution)
-    // Optimization: If range is huge, maybe check weekly? But daily is safer for targets.
-    // Limit: Don't check more than 365 days to avoid API abuse
-    // NO MAX DAYS LIMIT - CHECK DAILY FOR EVERY PREDICTION
-    // This removes the "60-Day Blind Spot"
-    // Daily check
     for (
       let d = new Date(checkStart);
       d <= checkEnd;
@@ -1718,7 +1870,14 @@ export class PriceService {
       const price = await this.searchPrice(asset, d, assetType);
       if (price !== null) {
         if (
-          this.checkHit(entryPrice, price, targetPrice, sentiment, assetType)
+          this.checkHit(
+            entryPrice,
+            price,
+            targetPrice,
+            sentiment,
+            assetType,
+            horizonDays
+          )
         ) {
           return {
             status: "correct",
@@ -1736,8 +1895,6 @@ export class PriceService {
     if (now > horizonEnd) {
       // Final check on the last day price to determine "wrong" value
       const finalPrice = await this.searchPrice(asset, checkEnd, assetType);
-      // Only return actualPrice if it's a valid non-zero value
-      // Returning undefined instead of 0 prevents storing meaningless "0.0000000" in DB
       return {
         status: "wrong",
         actualPrice: finalPrice && finalPrice > 0 ? finalPrice : undefined,
@@ -1749,55 +1906,74 @@ export class PriceService {
 
   /**
    * Helper to check if a single price hits the target/sentiment
-   * Now includes percentage thresholds based on asset type
+   *
+   * Enhanced with tiered thresholds based on:
+   * - Asset type: crypto (±10%), stock (±5%), forex (±1%), commodity/index (±3%)
+   * - Horizon length multipliers: short <30d (0.5x), medium 30-180d (1.0x), long >180d (1.5x)
+   * - Target price: if specified, reaching it is sufficient (sentiment direction ignored)
    */
   private checkHit(
     entry: number | null,
     current: number,
     target: number | null,
     sentiment: string,
-    assetType: string = "stock"
+    assetType: string = "stock",
+    horizonDays: number = 30
   ): boolean {
     const sent = sentiment.toLowerCase();
 
-    // 1. Target Price Check (Strict)
+    // 1. Target Price Check - reaching target alone is SUFFICIENT for correct
+    //    Sentiment direction is respected but target is the primary criterion
     if (target !== null) {
       if (sent === "bullish") return current >= target;
       if (sent === "bearish") return current <= target;
-      // If target exists but not met, return false immediately
+      // Neutral with target: check if price moved to target
       return false;
     }
 
     // 2. Sentiment Threshold Check (if no target)
     if (entry !== null) {
       const type = assetType.toLowerCase();
-      let thresholdUp = 0.05; // Default 5%
-      let thresholdDown = 0.05; // Default 5%
 
-      // Define thresholds based on asset type
+      // Base thresholds by asset type
+      let thresholdUp = 0.05; // Default 5%
+      let thresholdDown = 0.05;
+
       if (type === "crypto") {
         thresholdUp = 0.1; // +10%
-        thresholdDown = 0.1; // -10% (Tightened from -5%)
+        thresholdDown = 0.1;
       } else if (type === "stock") {
         thresholdUp = 0.05; // +5%
-        thresholdDown = 0.05; // -5%
-      } else if (type === "forex") {
+        thresholdDown = 0.05;
+      } else if (type === "forex" || type === "fx") {
         thresholdUp = 0.01; // +1%
-        thresholdDown = 0.01; // -1%
+        thresholdDown = 0.01;
       } else if (type === "commodity" || type === "index") {
         thresholdUp = 0.03; // +3%
-        thresholdDown = 0.03; // -3%
+        thresholdDown = 0.03;
       }
+
+      // Apply horizon length multiplier
+      // Short-term (<30 days): stricter 0.5x
+      // Medium-term (30-180 days): standard 1.0x
+      // Long-term (>180 days): more lenient 1.5x
+      let horizonMultiplier = 1.0;
+      if (horizonDays < 30) {
+        horizonMultiplier = 0.5; // Stricter for short-term
+      } else if (horizonDays > 180) {
+        horizonMultiplier = 1.5; // More lenient for long-term
+      }
+
+      thresholdUp *= horizonMultiplier;
+      thresholdDown *= horizonMultiplier;
 
       if (sent === "bullish") {
         const targetValue = entry * (1 + thresholdUp);
-        // Use small epsilon for floating point comparison
         return current >= targetValue - 0.0001;
       }
 
       if (sent === "bearish") {
         const targetValue = entry * (1 - thresholdDown);
-        // Use small epsilon for floating point comparison
         return current <= targetValue + 0.0001;
       }
     }
