@@ -35,3 +35,16 @@ export async function runPredictionChecks(
 }
 
 export default { runPredictionChecks };
+
+// Run if executed directly
+if (require.main === module) {
+  runPredictionChecks()
+    .then(() => {
+      console.log("✅ Prediction checks completed");
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error("❌ Prediction checks failed:", err);
+      process.exit(1);
+    });
+}

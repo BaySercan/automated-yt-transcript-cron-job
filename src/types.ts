@@ -174,6 +174,14 @@ export interface RunReport {
     errors: number;
   };
 
+  // Stage 8: Offering Evaluation
+  offerings: {
+    processed: number;
+    approved: number;
+    rejected: number;
+    errors: number;
+  };
+
   // System Health
   system: {
     memory_used_mb: number;
@@ -242,4 +250,81 @@ export interface RapidAPIResult {
   // Progress percentage from API
   progress?: number;
   percentage?: number;
+}
+
+// ==================== OFFERING EVALUATION TYPES ====================
+
+export type OfferingStatus =
+  | "waiting_for_inspection"
+  | "processing"
+  | "approved"
+  | "rejected"
+  | "duplicate";
+
+export interface Offering {
+  id: string;
+  user_id: string;
+  channel_id: string;
+  channel_link: string;
+  channel_handle?: string;
+  channel_title?: string;
+  thumbnail_url?: string;
+  video_link?: string;
+  status: OfferingStatus;
+  admin_notes?: string;
+  created_at: string;
+  // Evaluation fields (populated during processing)
+  subscriber_count?: number;
+  video_count_last_year?: number;
+  evaluated_at?: string;
+  rejection_reason?: string;
+  evaluation_details?: EvaluationDetails;
+  can_resubmit_after?: string;
+}
+
+export interface EvaluationResult {
+  passed: boolean;
+  subscriberCount: number;
+  videoCountLastYear: number;
+  isFinancialContent: boolean;
+  hasPredictions: boolean;
+  rejectionReason?: string;
+  details: EvaluationDetails;
+}
+
+export interface EvaluationDetails {
+  channel_info: {
+    title: string;
+    description: string;
+    subscriber_count: number;
+    total_videos: number;
+    videos_last_year: number;
+  };
+  content_analysis: {
+    is_financial: boolean;
+    confidence: number;
+    topics_detected: string[];
+    sample_titles_analyzed: number;
+  };
+  prediction_analysis: {
+    has_predictions: boolean;
+    quality_score: number;
+    videos_analyzed: number;
+    videos_with_predictions: number;
+    sample_videos: SampleVideoAnalysis[];
+    ai_reasoning: string;
+  };
+  final_decision: {
+    result: "approved" | "rejected";
+    reason: string | null;
+    decided_at: string;
+  };
+}
+
+export interface SampleVideoAnalysis {
+  video_id: string;
+  title: string;
+  predictions_found: number;
+  transcript_available: boolean;
+  is_financial: boolean;
 }

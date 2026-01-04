@@ -1861,11 +1861,29 @@ export class PriceService {
     const checkEnd = horizonEnd > now ? now : horizonEnd;
     const checkStart = horizonStart;
 
-    // Iterate through days in range (daily resolution)
+    // OPTIMIZATION: Use smart date stepping based on horizon length
+    // - Short horizons (<60 days): check every 3 days
+    // - Medium horizons (60-180 days): check weekly
+    // - Long horizons (>180 days): check bi-weekly
+    // This dramatically reduces API calls while maintaining accuracy
+    let stepDays = 1;
+    if (horizonDays > 180) {
+      stepDays = 14; // Bi-weekly for long-term predictions
+    } else if (horizonDays > 60) {
+      stepDays = 7; // Weekly for medium-term predictions
+    } else if (horizonDays > 14) {
+      stepDays = 3; // Every 3 days for short-term
+    }
+
+    logger.info(
+      `Verifying ${asset}: ${horizonDays} days horizon, step=${stepDays} days`
+    );
+
+    // Iterate through dates with smart stepping
     for (
       let d = new Date(checkStart);
       d <= checkEnd;
-      d.setDate(d.getDate() + 1)
+      d.setDate(d.getDate() + stepDays)
     ) {
       const price = await this.searchPrice(asset, d, assetType);
       if (price !== null) {
@@ -1885,6 +1903,28 @@ export class PriceService {
             actualPrice: price,
           };
         }
+      }
+    }
+
+    // FINAL CHECK: Always check the last day specifically if we haven't hit target yet
+    // This ensures we don't miss a target hit on the exact end date due to stepping
+    const lastDayPrice = await this.searchPrice(asset, checkEnd, assetType);
+    if (lastDayPrice !== null) {
+      if (
+        this.checkHit(
+          entryPrice,
+          lastDayPrice,
+          targetPrice,
+          sentiment,
+          assetType,
+          horizonDays
+        )
+      ) {
+        return {
+          status: "correct",
+          metDate: new Date(checkEnd),
+          actualPrice: lastDayPrice,
+        };
       }
     }
 

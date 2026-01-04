@@ -941,6 +941,174 @@ export class SupabaseService {
       return false;
     }
   }
+
+  // ==================== OFFERING EVALUATION METHODS ====================
+
+  // Get pending offerings for evaluation (status = 'waiting_for_inspection' or stuck 'processing')
+  async getPendingOfferings(): Promise<any[]> {
+    try {
+      const { data, error } = await this.client
+        .from("finfluencer_offerings")
+        .select("*")
+        .in("status", ["waiting_for_inspection", "processing"])
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        throw new DatabaseError(
+          `Failed to fetch pending offerings: ${error.message}`,
+          { cause: error }
+        );
+      }
+
+      logger.info(
+        `Fetched ${data?.length || 0} pending offerings for evaluation`
+      );
+      return data || [];
+    } catch (error) {
+      logger.error("Error fetching pending offerings", { error });
+      throw error;
+    }
+  }
+
+  // Mark offering as processing (in-progress)
+  async markOfferingProcessing(offeringId: string): Promise<void> {
+    try {
+      const { error } = await this.client
+        .from("finfluencer_offerings")
+        .update({ status: "processing" })
+        .eq("id", offeringId);
+
+      if (error) {
+        throw new DatabaseError(
+          `Failed to mark offering as processing: ${error.message}`,
+          { cause: error }
+        );
+      }
+
+      logger.debug(`Marked offering ${offeringId} as processing`);
+    } catch (error) {
+      logger.error(`Error marking offering ${offeringId} as processing`, {
+        error,
+      });
+      throw error;
+    }
+  }
+
+  // Update offering with evaluation result
+  async updateOfferingEvaluation(
+    offeringId: string,
+    result: {
+      status: "approved" | "rejected";
+      subscriberCount: number;
+      videoCountLastYear: number;
+      rejectionReason?: string;
+      evaluationDetails: any;
+      canResubmitAfter?: string;
+    }
+  ): Promise<void> {
+    try {
+      const updateData: any = {
+        status: result.status,
+        subscriber_count: result.subscriberCount,
+        video_count_last_year: result.videoCountLastYear,
+        evaluated_at: new Date().toISOString(),
+        evaluation_details: result.evaluationDetails,
+      };
+
+      if (result.rejectionReason) {
+        updateData.rejection_reason = result.rejectionReason;
+      }
+
+      if (result.canResubmitAfter) {
+        updateData.can_resubmit_after = result.canResubmitAfter;
+      }
+
+      const { error } = await this.client
+        .from("finfluencer_offerings")
+        .update(updateData)
+        .eq("id", offeringId);
+
+      if (error) {
+        throw new DatabaseError(
+          `Failed to update offering evaluation: ${error.message}`,
+          { cause: error }
+        );
+      }
+
+      logger.info(
+        `Updated offering ${offeringId} with status: ${result.status}`
+      );
+    } catch (error) {
+      logger.error(`Error updating offering ${offeringId}`, { error });
+      throw error;
+    }
+  }
+
+  // Add new finfluencer channel (called when offering is approved)
+  async addFinfluencerChannel(channelData: {
+    channel_id: string;
+    channel_name: string;
+    is_active: boolean;
+    channel_info: any;
+    channel_info_update_date: string;
+    avatar_url: string | null;
+    added_at: string;
+    last_checked_at: string | null;
+  }): Promise<string> {
+    try {
+      const { data, error } = await this.client
+        .from("finfluencer_channels")
+        .insert(channelData)
+        .select("id")
+        .single();
+
+      if (error) {
+        // Check for unique constraint violation (channel already exists)
+        if (error.code === "23505") {
+          logger.warn(
+            `Channel ${channelData.channel_id} already exists in finfluencer_channels`
+          );
+          // Return existing channel's info
+          const { data: existing } = await this.client
+            .from("finfluencer_channels")
+            .select("id")
+            .eq("channel_id", channelData.channel_id)
+            .single();
+          return existing?.id || "existing";
+        }
+        throw new DatabaseError(
+          `Failed to add finfluencer channel: ${error.message}`,
+          { cause: error }
+        );
+      }
+
+      logger.info(
+        `✅ Added new finfluencer channel: ${channelData.channel_name} (${channelData.channel_id})`
+      );
+      return data.id;
+    } catch (error) {
+      logger.error(
+        `Error adding finfluencer channel ${channelData.channel_id}`,
+        { error }
+      );
+      throw error;
+    }
+  }
+
+  // Upload avatar for a channel (reusing existing AvatarService)
+  async uploadChannelAvatar(
+    channelId: string,
+    thumbnailUrl: string
+  ): Promise<string | null> {
+    try {
+      return await this.avatarService.uploadAvatar(channelId, thumbnailUrl);
+    } catch (error) {
+      logger.error(`Error uploading avatar for channel ${channelId}`, {
+        error,
+      });
+      return null;
+    }
+  }
 }
 
 // Export singleton instance

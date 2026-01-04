@@ -76,6 +76,12 @@ class ReportingService {
         non_financial: 0,
         errors: 0,
       },
+      offerings: {
+        processed: 0,
+        approved: 0,
+        rejected: 0,
+        errors: 0,
+      },
       system: { memory_used_mb: 0, errors: [] },
     };
   }
@@ -206,6 +212,19 @@ class ReportingService {
   }
   incrementNewsErrors(): void {
     this.report.news.errors++;
+  }
+
+  // Offerings
+  updateOfferings(stats: {
+    processed: number;
+    approved: number;
+    rejected: number;
+    errors: number;
+  }): void {
+    this.report.offerings.processed = stats.processed;
+    this.report.offerings.approved = stats.approved;
+    this.report.offerings.rejected = stats.rejected;
+    this.report.offerings.errors = stats.errors;
   }
 
   // System

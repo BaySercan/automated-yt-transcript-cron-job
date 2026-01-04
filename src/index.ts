@@ -16,6 +16,7 @@ import {
 import { CronJobStats } from "./types";
 import { reportingService } from "./services/reportingService";
 import { newsService } from "./services/newsService";
+import { offeringEvaluationService } from "./services/offeringEvaluationService";
 import { ConfigurationError } from "./errors";
 
 class FinfluencerTracker {
@@ -73,6 +74,9 @@ class FinfluencerTracker {
 
       // Process News (Fetch, Scrape, Analyze)
       await newsService.processNews();
+
+      // Process Finfluencer Offerings (Evaluate and Approve/Reject)
+      await offeringEvaluationService.processOfferings();
 
       // Finalize and display report
       reportingService.finalize("success");
