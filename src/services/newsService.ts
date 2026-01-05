@@ -155,18 +155,38 @@ export class NewsService {
     if (items.length === 0) return [];
 
     const urls = items.map((i) => i.url);
-    const { data: existing, error } = await supabaseService
-      .getClient()
-      .from("news_items")
-      .select("url")
-      .in("url", urls);
+    const existingUrls = new Set<string>();
 
-    if (error) {
-      logger.error("Failed to check existing news items", { error });
-      return [];
+    // Batch URL checks in groups of 100 to avoid Supabase query limits
+    const batchSize = 100;
+    for (let i = 0; i < urls.length; i += batchSize) {
+      const batch = urls.slice(i, i + batchSize);
+      try {
+        const { data: existing, error } = await supabaseService
+          .getClient()
+          .from("news_items")
+          .select("url")
+          .in("url", batch);
+
+        if (error) {
+          logger.error(
+            `Failed to check existing news items (batch ${i / batchSize + 1})`,
+            { error }
+          );
+          continue;
+        }
+
+        for (const item of existing || []) {
+          existingUrls.add(item.url);
+        }
+      } catch (err) {
+        logger.error(`Error checking news batch: ${err}`);
+      }
     }
 
-    const existingUrls = new Set(existing?.map((e) => e.url) || []);
+    logger.info(
+      `Found ${existingUrls.size} existing URLs out of ${urls.length} total`
+    );
     return items.filter((i) => !existingUrls.has(i.url));
   }
 

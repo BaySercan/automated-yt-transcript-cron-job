@@ -1147,6 +1147,48 @@ Turkish speakers often discuss two different gold products:
     return { type, value: sanitizeText(String(horizon.value || "unknown")) };
   }
 
+  /**
+   * Parse a horizon expression using AI to determine the end date
+   */
+  public async parseHorizonExpression(
+    expression: string,
+    postDate: Date
+  ): Promise<{ endDate: string; confidence: string } | null> {
+    try {
+      const prompt = `Parse this financial prediction horizon prediction and return ONLY a JSON object.
+
+Expression: "${expression}"
+Reference date (when prediction was made): ${
+        postDate.toISOString().split("T")[0]
+      }
+Today's date: ${new Date().toISOString().split("T")[0]}
+
+Determine the END DATE for when this prediction should be evaluated by.
+
+Rules:
+1. If the expression mentions a specific year (e.g., "2026", "by 2029"), use Dec 31 of that year
+2. If it mentions "few months", use 3-6 months from reference date
+3. If it mentions "short term" / "kısa vade", use 3 months
+4. If it mentions "medium term" / "orta vade", use 6-12 months
+5. If it mentions "long term" / "uzun vade", use 1-3 years
+6. If truly unclear, default to 6 months from reference date
+
+Return ONLY this JSON format, no explanation:
+{"endDate": "YYYY-MM-DD", "confidence": "high|medium|low"}`;
+
+      const response = await this.sendRequest(prompt);
+      const content = this.extractResponseContent(response);
+
+      if (content) {
+        const cleaned = this.cleanJsonResponse(content);
+        return JSON.parse(cleaned);
+      }
+    } catch (error) {
+      logger.warn(`AI horizon parsing error: ${error}`);
+    }
+    return null;
+  }
+
   private validateTargetPrice(price: any): number | null {
     if (price === null || price === undefined) return null;
 

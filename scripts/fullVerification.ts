@@ -26,6 +26,12 @@ import { logger } from "../src/utils";
     npx ts-node scripts/fullVerification.ts
     # Step 4: Apply verification (update statuses + fix horizons)
     npx ts-node scripts/fullVerification.ts --apply
+
+    # If that works, process in batches of 1000 with offset
+    npx ts-node scripts/fullVerification.ts --limit=1000 --offset=0
+    npx ts-node scripts/fullVerification.ts --limit=1000 --offset=1000
+    npx ts-node scripts/fullVerification.ts --limit=1000 --offset=2000
+    # ... etc
  */
 
 // Maximum allowed horizon: 15 years from post_date (for predictions like "by 2030")
@@ -321,12 +327,27 @@ class FullVerificationService {
     const horizonType = pred.horizon_type || "custom";
 
     // Recalculate horizon dates
-    let { start: newHorizonStart, end: newHorizonEnd } =
-      priceService.calculateHorizonDateRange(
+    // Recalculate horizon dates
+    let newHorizonStart: Date;
+    let newHorizonEnd: Date;
+
+    if (useAI) {
+      const hResult = await priceService.calculateHorizonDateRangeWithAI(
         postDate,
         horizonValue,
         horizonType
       );
+      newHorizonStart = hResult.start;
+      newHorizonEnd = hResult.end;
+    } else {
+      const hResult = priceService.calculateHorizonDateRange(
+        postDate,
+        horizonValue,
+        horizonType
+      );
+      newHorizonStart = hResult.start;
+      newHorizonEnd = hResult.end;
+    }
 
     // SANITIZE: Cap insane horizon dates at 2 years
     const maxAllowedEnd = new Date(postDate);

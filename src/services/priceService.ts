@@ -8,6 +8,7 @@ import { supabaseService } from "../supabase";
 import { usagoldService } from "./usagoldService";
 import { reportingService } from "./reportingService";
 import { twelveDataService } from "./twelveDataService";
+import { globalAIAnalyzer } from "../enhancedAnalyzer";
 
 export class PriceService {
   private readonly USER_AGENT = "Mozilla/5.0";
@@ -471,6 +472,120 @@ export class PriceService {
     } catch (error) {
       logger.warn(`Failed to batch save prices for ${asset}: ${error}`);
     }
+  }
+
+  /**
+   * Get historical prices for an entire date range in ONE API call
+   * This is much more efficient than calling searchPrice for each day
+   * @param asset Asset name
+   * @param startDate Start of date range
+   * @param endDate End of date range
+   * @param assetType Optional asset type for better symbol resolution
+   * @returns Map of "YYYY-MM-DD" -> price
+   */
+  async getPriceRangeBatch(
+    asset: string,
+    startDate: Date,
+    endDate: Date,
+    assetType?: string
+  ): Promise<Map<string, number>> {
+    const priceMap = new Map<string, number>();
+    const normalizedAsset = this.normalizeAssetName(asset);
+    const type = assetType?.toLowerCase() || "stock";
+
+    logger.info(
+      `Batch fetching prices for ${asset} from ${
+        startDate.toISOString().split("T")[0]
+      } to ${endDate.toISOString().split("T")[0]}`
+    );
+
+    // Step 1: Check asset_prices table cache first
+    try {
+      const startStr = startDate.toISOString().split("T")[0];
+      const endStr = endDate.toISOString().split("T")[0];
+
+      const { data: cachedPrices } = await supabaseService.supabase
+        .from("asset_prices")
+        .select("date, price")
+        .eq("asset", normalizedAsset)
+        .gte("date", startStr)
+        .lte("date", endStr)
+        .order("date", { ascending: true });
+
+      if (cachedPrices && cachedPrices.length > 0) {
+        for (const row of cachedPrices) {
+          priceMap.set(row.date, parseFloat(row.price));
+        }
+        logger.info(
+          `Found ${priceMap.size} cached prices for ${asset} in range`
+        );
+
+        // If we have good coverage (>50% of trading days), return cached
+        const daysDiff = Math.ceil(
+          (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
+        );
+        const tradingDays = Math.ceil(daysDiff * 0.7); // ~70% are trading days
+        if (priceMap.size >= tradingDays * 0.5) {
+          logger.info(`Using cached prices (${priceMap.size}/${tradingDays})`);
+          return priceMap;
+        }
+      }
+    } catch (err) {
+      logger.warn(`Cache lookup failed for ${asset}: ${err}`);
+    }
+
+    // Step 2: Fetch from Yahoo Finance API (batch)
+    try {
+      const yahooSymbol = await this.resolveYahooTicker(asset, type);
+
+      if (yahooSymbol) {
+        const yahooData = await yahooService.getHistoryRange(
+          yahooSymbol,
+          startDate,
+          endDate
+        );
+
+        if (yahooData.size > 0) {
+          // Merge with any cached data (API data takes precedence)
+          for (const [dateStr, price] of yahooData) {
+            priceMap.set(dateStr, price);
+          }
+
+          // Save to cache for future use
+          const currency = this.detectCurrency(asset, type);
+          await this.saveBatchToAssetPriceTable(
+            asset,
+            yahooData,
+            currency,
+            "yahoo_batch",
+            type
+          );
+
+          logger.info(
+            `Fetched ${yahooData.size} prices from Yahoo for ${asset}`
+          );
+        }
+      }
+    } catch (err) {
+      logger.warn(`Yahoo batch fetch failed for ${asset}: ${err}`);
+    }
+
+    // Step 3: For crypto, try CoinGecko market_chart range API
+    if (type === "crypto" && priceMap.size === 0) {
+      try {
+        // CoinGecko has a market_chart/range endpoint for batch historical data
+        // For now, we'll skip this as it requires different API handling
+        // The Yahoo fallback for crypto (BTC-USD etc) usually works
+        logger.info(`Crypto batch fetch not implemented, using cached data`);
+      } catch (err) {
+        logger.warn(`Crypto batch fetch failed: ${err}`);
+      }
+    }
+
+    logger.info(
+      `Total ${priceMap.size} prices available for ${asset} in range`
+    );
+    return priceMap;
   }
 
   /**
@@ -1682,6 +1797,24 @@ export class PriceService {
       return { start, end };
     }
 
+    // 2b. Year embedded in text: "2026 yılında", "by 2029", "in 2026", "2025'in geri kalanı ve 2026"
+    //     Handles multi-year spans: "2025 ve 2026", "between 2025 and 2027"
+    const embeddedYears = value.match(/20[2-5]\d/g); // Matches 2020-2059
+    if (embeddedYears && embeddedYears.length > 0) {
+      const years = embeddedYears.map((y) => parseInt(y, 10));
+      const minYear = Math.min(...years);
+      const maxYear = Math.max(...years);
+
+      // If expression contains "rest of" / "geri kalanı", start from now
+      if (value.includes("rest of") || value.includes("geri kalan")) {
+        start.setTime(postDate.getTime());
+      } else {
+        start.setFullYear(minYear, 0, 1); // Jan 1 of first year
+      }
+      end.setFullYear(maxYear, 11, 31); // Dec 31 of last year
+      return { start, end };
+    }
+
     // 3. "Next year" / "gelecek yıl" / "önümüzdeki yıl" patterns
     //    Full next calendar year
     if (
@@ -1794,9 +1927,18 @@ export class PriceService {
       value.includes("yil") ||
       value.includes("yıl")
     ) {
-      // Explicit number of years ahead
-      end.setFullYear(end.getFullYear() + number);
-      start.setTime(postDate.getTime());
+      // Check if the number is a SPECIFIC YEAR (2025, 2026, 2029, etc.) vs a RELATIVE count
+      // A specific year is 2020-2050 range, relative count is typically 1-10
+      if (number >= 2020 && number <= 2050) {
+        // Specific year mentioned: "2026 yılında", "by 2029", "2026 yılından itibaren"
+        // Set end to Dec 31 of that specific year
+        start.setFullYear(number, 0, 1); // Jan 1 of that year
+        end.setFullYear(number, 11, 31); // Dec 31 of that year
+      } else {
+        // Relative number of years: "2 yıl içinde", "within 3 years"
+        end.setFullYear(end.getFullYear() + number);
+        start.setTime(postDate.getTime());
+      }
       return { start, end };
     } else if (value.includes("week") || value.includes("hafta")) {
       end.setDate(end.getDate() + number * 7);
@@ -1822,6 +1964,81 @@ export class PriceService {
     start.setTime(postDate.getTime());
 
     return { start, end };
+  }
+
+  /**
+   * Calculate horizon date range with AI fallback for unmatched patterns
+   * First tries regex patterns, then falls back to AI for complex expressions
+   */
+  async calculateHorizonDateRangeWithAI(
+    postDate: Date,
+    horizonValue: string,
+    horizonType: string = "custom"
+  ): Promise<{ start: Date; end: Date; usedAI: boolean }> {
+    const value = horizonValue.toLowerCase().trim();
+
+    // First try regex-based parsing
+    const regexResult = this.calculateHorizonDateRange(
+      postDate,
+      horizonValue,
+      horizonType
+    );
+
+    // Check if the regex matched a real pattern (not just the 90-day fallback)
+    // If end is exactly 90 days from post date, it's the fallback case
+    const daysDiff = Math.floor(
+      (regexResult.end.getTime() - postDate.getTime()) / (1000 * 60 * 60 * 24)
+    );
+
+    // If regex found a specific pattern (not the 90-day fallback), use it
+    if (daysDiff !== 90) {
+      return { ...regexResult, usedAI: false };
+    }
+
+    // Check if we have recognizable time keywords - if so, regex was right
+    const hasTimeKeywords =
+      value.match(/\d+/) || // Has numbers
+      value.includes("year") ||
+      value.includes("yıl") ||
+      value.includes("month") ||
+      value.includes("ay") ||
+      value.includes("week") ||
+      value.includes("hafta") ||
+      value.includes("day") ||
+      value.includes("gün");
+
+    if (hasTimeKeywords) {
+      return { ...regexResult, usedAI: false };
+    }
+
+    // AI Fallback: Only for truly vague expressions
+    try {
+      logger.debug(`🤖 Using AI to parse horizon: "${horizonValue}"`);
+
+      const aiResult = await globalAIAnalyzer.parseHorizonExpression(
+        horizonValue,
+        postDate
+      );
+
+      if (aiResult?.endDate) {
+        const aiEnd = new Date(aiResult.endDate);
+        if (!isNaN(aiEnd.getTime())) {
+          logger.debug(
+            `✅ AI parsed horizon: "${horizonValue}" → ${aiResult.endDate} (${aiResult.confidence})`
+          );
+          return {
+            start: new Date(postDate),
+            end: aiEnd,
+            usedAI: true,
+          };
+        }
+      }
+    } catch (error) {
+      logger.warn(`AI horizon parsing failed for "${horizonValue}": ${error}`);
+    }
+
+    // Final fallback: use regex result
+    return { ...regexResult, usedAI: false };
   }
 
   /**
@@ -1861,32 +2078,37 @@ export class PriceService {
     const checkEnd = horizonEnd > now ? now : horizonEnd;
     const checkStart = horizonStart;
 
-    // OPTIMIZATION: Use smart date stepping based on horizon length
-    // - Short horizons (<60 days): check every 3 days
-    // - Medium horizons (60-180 days): check weekly
-    // - Long horizons (>180 days): check bi-weekly
-    // This dramatically reduces API calls while maintaining accuracy
-    let stepDays = 1;
-    if (horizonDays > 180) {
-      stepDays = 14; // Bi-weekly for long-term predictions
-    } else if (horizonDays > 60) {
-      stepDays = 7; // Weekly for medium-term predictions
-    } else if (horizonDays > 14) {
-      stepDays = 3; // Every 3 days for short-term
-    }
-
     logger.info(
-      `Verifying ${asset}: ${horizonDays} days horizon, step=${stepDays} days`
+      `Verifying ${asset}: ${horizonDays} days horizon (${
+        checkStart.toISOString().split("T")[0]
+      } to ${checkEnd.toISOString().split("T")[0]})`
     );
 
-    // Iterate through dates with smart stepping
-    for (
-      let d = new Date(checkStart);
-      d <= checkEnd;
-      d.setDate(d.getDate() + stepDays)
-    ) {
-      const price = await this.searchPrice(asset, d, assetType);
-      if (price !== null) {
+    // BATCH FETCH: Get ALL prices for the date range in ONE API call
+    const priceMap = await this.getPriceRangeBatch(
+      asset,
+      checkStart,
+      checkEnd,
+      assetType
+    );
+
+    if (priceMap.size === 0) {
+      logger.warn(`No price data found for ${asset} in range, using pending`);
+      // If no data at all and horizon hasn't passed, still pending
+      if (now <= horizonEnd) {
+        return { status: "pending" };
+      }
+      // Otherwise, it's wrong with no price data
+      return { status: "wrong" };
+    }
+
+    // Sort dates to iterate chronologically
+    const sortedDates = Array.from(priceMap.keys()).sort();
+
+    // Iterate through ALL available price points
+    for (const dateStr of sortedDates) {
+      const price = priceMap.get(dateStr);
+      if (price !== null && price !== undefined) {
         if (
           this.checkHit(
             entryPrice,
@@ -1897,34 +2119,17 @@ export class PriceService {
             horizonDays
           )
         ) {
+          // Parse the date string to return
+          const metDate = new Date(dateStr + "T00:00:00Z");
+          logger.info(
+            `Prediction CORRECT: ${asset} hit target on ${dateStr} at ${price}`
+          );
           return {
             status: "correct",
-            metDate: new Date(d),
+            metDate,
             actualPrice: price,
           };
         }
-      }
-    }
-
-    // FINAL CHECK: Always check the last day specifically if we haven't hit target yet
-    // This ensures we don't miss a target hit on the exact end date due to stepping
-    const lastDayPrice = await this.searchPrice(asset, checkEnd, assetType);
-    if (lastDayPrice !== null) {
-      if (
-        this.checkHit(
-          entryPrice,
-          lastDayPrice,
-          targetPrice,
-          sentiment,
-          assetType,
-          horizonDays
-        )
-      ) {
-        return {
-          status: "correct",
-          metDate: new Date(checkEnd),
-          actualPrice: lastDayPrice,
-        };
       }
     }
 
@@ -1933,11 +2138,15 @@ export class PriceService {
     // 2. If horizonEnd is in future, and we haven't hit target yet -> PENDING
 
     if (now > horizonEnd) {
-      // Final check on the last day price to determine "wrong" value
-      const finalPrice = await this.searchPrice(asset, checkEnd, assetType);
+      // Get the last available price for the "actual" price
+      const lastDateStr = sortedDates[sortedDates.length - 1];
+      const lastPrice = priceMap.get(lastDateStr);
+      logger.info(
+        `Prediction WRONG: ${asset} never hit target, last price ${lastPrice} on ${lastDateStr}`
+      );
       return {
         status: "wrong",
-        actualPrice: finalPrice && finalPrice > 0 ? finalPrice : undefined,
+        actualPrice: lastPrice && lastPrice > 0 ? lastPrice : undefined,
       };
     }
 
