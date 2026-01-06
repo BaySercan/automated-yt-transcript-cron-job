@@ -259,7 +259,8 @@ export type OfferingStatus =
   | "processing"
   | "approved"
   | "rejected"
-  | "duplicate";
+  | "duplicate"
+  | "needs_transcript_retry";
 
 export interface Offering {
   id: string;
@@ -280,6 +281,8 @@ export interface Offering {
   rejection_reason?: string;
   evaluation_details?: EvaluationDetails;
   can_resubmit_after?: string;
+  retry_count?: number;
+  next_retry_at?: string;
 }
 
 export interface EvaluationResult {
@@ -290,6 +293,7 @@ export interface EvaluationResult {
   hasPredictions: boolean;
   rejectionReason?: string;
   details: EvaluationDetails;
+  needsTranscriptRetry?: boolean; // Set when insufficient transcripts available
 }
 
 export interface EvaluationDetails {
@@ -315,7 +319,7 @@ export interface EvaluationDetails {
     ai_reasoning: string;
   };
   final_decision: {
-    result: "approved" | "rejected";
+    result: "approved" | "rejected" | "needs_retry";
     reason: string | null;
     decided_at: string;
   };

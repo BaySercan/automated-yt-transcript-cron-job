@@ -31,6 +31,11 @@ class OfferingEvaluationService {
   private readonly SAMPLE_VIDEO_COUNT = 10;
   private readonly RESUBMIT_DELAY_MONTHS = 6;
 
+  // Transcript retry configuration
+  private readonly MIN_TRANSCRIPT_RATE = 0.5; // At least 50% of videos must have transcripts
+  private readonly MAX_RETRY_ATTEMPTS = 3;
+  private readonly RETRY_DELAY_DAYS = 7;
+
   /**
    * Main entry point - called from index.ts
    * Processes all pending offerings
@@ -49,9 +54,19 @@ class OfferingEvaluationService {
 
       logger.info(`📋 Found ${offerings.length} offering(s) to evaluate`);
 
+      // Also fetch offerings ready for transcript retry
+      const retryOfferings = await supabaseService.getRetryOfferings();
+      if (retryOfferings.length > 0) {
+        logger.info(
+          `🔄 Found ${retryOfferings.length} offering(s) ready for transcript retry`
+        );
+        offerings.push(...retryOfferings);
+      }
+
       let processed = 0;
       let approved = 0;
       let rejected = 0;
+      let retried = 0;
       let errors = 0;
 
       for (const offering of offerings) {
@@ -74,6 +89,8 @@ class OfferingEvaluationService {
           processed++;
           if (result.passed) {
             approved++;
+          } else if (result.needsTranscriptRetry) {
+            retried++;
           } else {
             rejected++;
           }
@@ -139,6 +156,7 @@ class OfferingEvaluationService {
       logger.info(`   Processed: ${processed}`);
       logger.info(`   Approved: ${approved}`);
       logger.info(`   Rejected: ${rejected}`);
+      logger.info(`   Needs Retry: ${retried}`);
       logger.info(`   Errors: ${errors}`);
       logger.info(`${"=".repeat(60)}\n`);
 
@@ -266,8 +284,61 @@ class OfferingEvaluationService {
       `   Videos with predictions: ${predictionAnalysis.videos_with_predictions}/${predictionAnalysis.videos_analyzed}`
     );
     logger.info(`   Quality score: ${predictionAnalysis.quality_score}`);
+    logger.info(
+      `   Transcript availability: ${
+        predictionAnalysis.transcript_rate
+      }% (min: ${this.MIN_TRANSCRIPT_RATE * 100}%)`
+    );
 
-    // Check prediction quality
+    // Check if we need to retry due to low transcript availability
+    const currentRetryCount = offering.retry_count || 0;
+    if (predictionAnalysis.needs_retry) {
+      if (currentRetryCount >= this.MAX_RETRY_ATTEMPTS) {
+        // Max retries exceeded - reject with clear reason
+        logger.info(
+          `❌ Max retry attempts (${this.MAX_RETRY_ATTEMPTS}) exceeded - rejecting`
+        );
+        return this.createRejectionResult(
+          `Insufficient transcript data after ${
+            this.MAX_RETRY_ATTEMPTS
+          } retry attempts. Only ${Math.round(
+            predictionAnalysis.transcript_rate * 100
+          )}% of videos had transcripts available.`,
+          details as EvaluationDetails,
+          subscriberCount,
+          videoCountLastYear
+        );
+      }
+
+      // Need retry - return special result
+      logger.info(
+        `🔄 Insufficient transcripts - scheduling retry (attempt ${
+          currentRetryCount + 1
+        }/${this.MAX_RETRY_ATTEMPTS})`
+      );
+
+      details.final_decision = {
+        result: "needs_retry",
+        reason: `Only ${Math.round(
+          predictionAnalysis.transcript_rate * 100
+        )}% of videos had transcripts available (minimum: ${
+          this.MIN_TRANSCRIPT_RATE * 100
+        }%). Will retry in ${this.RETRY_DELAY_DAYS} days.`,
+        decided_at: new Date().toISOString(),
+      };
+
+      return {
+        passed: false,
+        subscriberCount,
+        videoCountLastYear,
+        isFinancialContent: true,
+        hasPredictions: false,
+        needsTranscriptRetry: true,
+        details: details as EvaluationDetails,
+      };
+    }
+
+    // Check prediction quality (only if we have enough transcripts)
     if (!predictionAnalysis.has_predictions) {
       return this.createRejectionResult(
         `No actionable predictions: Channel content does not contain specific financial predictions`,
@@ -371,6 +442,8 @@ Respond in JSON format:
     videos_with_predictions: number;
     sample_videos: SampleVideoAnalysis[];
     ai_reasoning: string;
+    transcript_rate: number; // Percentage of videos with transcripts (0-1)
+    needs_retry: boolean; // True if transcript rate is below minimum threshold
   }> {
     const sampleResults: SampleVideoAnalysis[] = [];
     let videosWithPredictions = 0;
@@ -446,6 +519,14 @@ Respond in JSON format:
     const videosWithTranscripts = sampleResults.filter(
       (v) => v.transcript_available
     ).length;
+
+    // Calculate transcript availability rate
+    const transcriptRate =
+      videosAnalyzed > 0 ? videosWithTranscripts / videosAnalyzed : 0;
+
+    // Check if we need retry due to insufficient transcripts
+    const needsRetry = transcriptRate < this.MIN_TRANSCRIPT_RATE;
+
     const predictionRate =
       videosWithTranscripts > 0
         ? videosWithPredictions / videosWithTranscripts
@@ -455,13 +536,22 @@ Respond in JSON format:
     // Channel needs at least 30% of videos to have predictions
     const hasPredictions = predictionRate >= 0.3 && videosWithPredictions >= 2;
 
-    const reasoning = hasPredictions
-      ? `Channel shows consistent prediction content: ${videosWithPredictions}/${videosWithTranscripts} analyzed videos contain predictions (${Math.round(
-          predictionRate * 100
-        )}%). Total ${totalPredictions} predictions found.`
-      : `Insufficient prediction content: Only ${videosWithPredictions}/${videosWithTranscripts} analyzed videos contain predictions (${Math.round(
-          predictionRate * 100
-        )}%). Minimum 30% required with at least 2 videos.`;
+    let reasoning = "";
+    if (needsRetry) {
+      reasoning = `Insufficient transcripts: Only ${videosWithTranscripts}/${videosAnalyzed} videos (${Math.round(
+        transcriptRate * 100
+      )}%) had transcripts available. Minimum ${
+        this.MIN_TRANSCRIPT_RATE * 100
+      }% required for evaluation.`;
+    } else if (hasPredictions) {
+      reasoning = `Channel shows consistent prediction content: ${videosWithPredictions}/${videosWithTranscripts} analyzed videos contain predictions (${Math.round(
+        predictionRate * 100
+      )}%). Total ${totalPredictions} predictions found.`;
+    } else {
+      reasoning = `Insufficient prediction content: Only ${videosWithPredictions}/${videosWithTranscripts} analyzed videos contain predictions (${Math.round(
+        predictionRate * 100
+      )}%). Minimum 30% required with at least 2 videos.`;
+    }
 
     return {
       has_predictions: hasPredictions,
@@ -470,6 +560,8 @@ Respond in JSON format:
       videos_with_predictions: videosWithPredictions,
       sample_videos: sampleResults,
       ai_reasoning: reasoning,
+      transcript_rate: transcriptRate,
+      needs_retry: needsRetry,
     };
   }
 
@@ -516,6 +608,22 @@ Respond in JSON format:
       // Update offering status
       await supabaseService.updateOfferingEvaluation(offering.id, {
         status: "approved",
+        subscriberCount: result.subscriberCount,
+        videoCountLastYear: result.videoCountLastYear,
+        evaluationDetails: result.details,
+      });
+    } else if (result.needsTranscriptRetry) {
+      // Needs transcript retry - schedule for later evaluation
+      const currentRetryCount = (offering.retry_count || 0) + 1;
+      const nextRetryDate = this.getNextRetryDate();
+
+      logger.info(
+        `🔄 Scheduling transcript retry #${currentRetryCount} for ${nextRetryDate}`
+      );
+
+      await supabaseService.markOfferingForRetry(offering.id, {
+        retryCount: currentRetryCount,
+        nextRetryAt: nextRetryDate,
         subscriberCount: result.subscriberCount,
         videoCountLastYear: result.videoCountLastYear,
         evaluationDetails: result.details,
@@ -592,6 +700,15 @@ Respond in JSON format:
   private getResubmitDate(): string {
     const date = new Date();
     date.setMonth(date.getMonth() + this.RESUBMIT_DELAY_MONTHS);
+    return date.toISOString();
+  }
+
+  /**
+   * Calculate next retry date (RETRY_DELAY_DAYS from now)
+   */
+  private getNextRetryDate(): string {
+    const date = new Date();
+    date.setDate(date.getDate() + this.RETRY_DELAY_DAYS);
     return date.toISOString();
   }
 

@@ -994,6 +994,77 @@ export class SupabaseService {
     }
   }
 
+  // Get offerings ready for transcript retry (status = 'needs_transcript_retry' and next_retry_at <= now)
+  async getRetryOfferings(): Promise<any[]> {
+    try {
+      const now = new Date().toISOString();
+      const { data, error } = await this.client
+        .from("finfluencer_offerings")
+        .select("*")
+        .eq("status", "needs_transcript_retry")
+        .lte("next_retry_at", now)
+        .order("next_retry_at", { ascending: true });
+
+      if (error) {
+        throw new DatabaseError(
+          `Failed to fetch retry offerings: ${error.message}`,
+          { cause: error }
+        );
+      }
+
+      logger.info(
+        `Fetched ${data?.length || 0} offerings ready for transcript retry`
+      );
+      return data || [];
+    } catch (error) {
+      logger.error("Error fetching retry offerings", { error });
+      throw error;
+    }
+  }
+
+  // Mark offering for transcript retry (schedule re-evaluation later)
+  async markOfferingForRetry(
+    offeringId: string,
+    result: {
+      retryCount: number;
+      nextRetryAt: string;
+      subscriberCount: number;
+      videoCountLastYear: number;
+      evaluationDetails: any;
+    }
+  ): Promise<void> {
+    try {
+      const updateData: any = {
+        status: "needs_transcript_retry",
+        retry_count: result.retryCount,
+        next_retry_at: result.nextRetryAt,
+        subscriber_count: result.subscriberCount,
+        video_count_last_year: result.videoCountLastYear,
+        evaluation_details: result.evaluationDetails,
+        evaluated_at: new Date().toISOString(),
+      };
+
+      const { error } = await this.client
+        .from("finfluencer_offerings")
+        .update(updateData)
+        .eq("id", offeringId);
+
+      if (error) {
+        throw new DatabaseError(
+          `Failed to mark offering for retry: ${error.message}`,
+          { cause: error }
+        );
+      }
+
+      logger.info(
+        `Marked offering ${offeringId} for retry #${result.retryCount}, next attempt: ${result.nextRetryAt}`
+      );
+    } catch (error) {
+      logger.error(`Error marking offering ${offeringId} for retry`, { error });
+      throw error;
+    }
+  }
+
   // Update offering with evaluation result
   async updateOfferingEvaluation(
     offeringId: string,
