@@ -32,6 +32,8 @@ import { logger } from "../src/utils";
     npx ts-node scripts/fullVerification.ts --limit=1000 --offset=1000
     npx ts-node scripts/fullVerification.ts --limit=1000 --offset=2000
     # ... etc
+
+    npx ts-node scripts/fullVerification.ts --verify --use-ai
  */
 
 // Maximum allowed horizon: 15 years from post_date (for predictions like "by 2030")
