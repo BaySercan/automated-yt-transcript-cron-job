@@ -644,12 +644,17 @@ If the horizon value is INVALID, provide a corrected value based on:
         ai_verification_reasoning: result.reasoning,
       };
 
-      // Only set resolved_at if actually resolved
+      // Handle resolution fields
       if (result.status !== "pending") {
+        // If resolved (correct/wrong), set resolution fields
         updateData.resolved_at = new Date().toISOString();
         if (actualPrice) {
           updateData.actual_price = String(actualPrice);
         }
+      } else {
+        // If pending, CLEAR resolution fields (in case it was previously resolved)
+        updateData.resolved_at = null;
+        updateData.actual_price = null;
       }
 
       // Only set correction fields if horizon was corrected

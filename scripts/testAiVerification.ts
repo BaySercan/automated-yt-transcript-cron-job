@@ -168,16 +168,15 @@ async function testBatch(
 ): Promise<void> {
   console.log(`\n${"=".repeat(70)}`);
   console.log(
-    `🧪 Testing AI Verification on ${limit} pending predictions (offset: ${offset})`
+    `🧪 Testing AI Verification on ${limit} predictions (offset: ${offset})`
   );
   console.log(`Mode: ${apply ? "APPLY" : "DRY RUN"}`);
   console.log(`${"=".repeat(70)}\n`);
 
-  // Fetch pending predictions
+  // Fetch predictions (all statuses)
   const { data: predictions, error } = await supabaseService.supabase
     .from("combined_predictions")
     .select("id, asset, sentiment, horizon_value, status")
-    .eq("status", "pending")
     .order("created_at", { ascending: true })
     .range(offset, offset + limit - 1);
 
