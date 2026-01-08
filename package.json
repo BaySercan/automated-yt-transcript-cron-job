@@ -1,6 +1,6 @@
 {
   "name": "automated-yt-transcript-generator",
-  "version": "2.0.26",
+  "version": "2.0.27",
   "description": "Dockerized microservice for tracking financial influencer YouTube videos and analyzing predictions",
   "main": "dist/index.js",
   "scripts": {
