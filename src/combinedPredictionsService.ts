@@ -6,6 +6,7 @@ import { priceService } from "./services/priceService";
 import { reportingService } from "./services/reportingService";
 import { assetClassifierService } from "./services/assetClassifierService";
 import { globalAIAnalyzer } from "./enhancedAnalyzer";
+import { aiVerificationService } from "./services/aiVerificationService";
 
 /**
  * Combined Predictions Service
@@ -445,6 +446,166 @@ export class CombinedPredictionsService {
       this.log("error", "Unhandled error during reconciliation", {
         err: this.safeErrorMessage(err),
       });
+    }
+  }
+
+  /**
+   * Reconcile predictions using full AI verification with transcript context.
+   * This is the new AI-driven approach that replaces hardcoded verification logic.
+   *
+   * Key differences from reconcilePredictions:
+   * - Uses full transcript context for understanding
+   * - AI validates and corrects horizon dates
+   * - Provides detailed reasoning for audit trail
+   * - Handles conditional predictions and hedging language
+   */
+  async reconcileWithAI(
+    options: {
+      limit?: number;
+      dryRun?: boolean;
+      requestId?: string;
+    } = {}
+  ): Promise<{
+    processed: number;
+    correct: number;
+    wrong: number;
+    pending: number;
+    horizonsCorrected: number;
+    errors: number;
+  }> {
+    const requestId =
+      options.requestId || crypto.randomUUID?.() || String(Date.now());
+    const limit = options.limit ?? 100;
+    const dryRun = options.dryRun ?? false;
+
+    this.log("info", "Starting AI-driven prediction reconciliation", {
+      requestId,
+      limit,
+      dryRun,
+    });
+
+    const results = {
+      processed: 0,
+      correct: 0,
+      wrong: 0,
+      pending: 0,
+      horizonsCorrected: 0,
+      errors: 0,
+    };
+
+    try {
+      // Fetch pending predictions that haven't been AI verified
+      const { data: rows, error } = await supabaseService.supabase
+        .from("combined_predictions")
+        .select("id, asset, post_date, horizon_end_date")
+        .eq("status", "pending")
+        .is("ai_verification_at", null) // Only process unverified predictions
+        .order("post_date", { ascending: true }) // Oldest first
+        .limit(limit);
+
+      if (error) {
+        this.log("error", "Error fetching predictions for AI verification", {
+          error: this.safeErrorMessage(error),
+        });
+        return results;
+      }
+
+      this.log(
+        "info",
+        `Found ${rows?.length || 0} predictions for AI verification`,
+        {
+          requestId,
+        }
+      );
+
+      for (const row of rows || []) {
+        try {
+          this.log("info", `🤖 AI verifying ${row.asset}`, {
+            predictionId: row.id,
+          });
+
+          if (dryRun) {
+            // In dry-run mode, just gather context and verify but don't apply
+            const context = await aiVerificationService.gatherContext(row.id);
+            if (!context) {
+              this.log("warn", `Failed to gather context for ${row.asset}`, {
+                id: row.id,
+              });
+              results.errors++;
+              continue;
+            }
+
+            const result = await aiVerificationService.verifyPrediction(
+              context
+            );
+            if (result) {
+              results.processed++;
+              if (result.status === "correct") results.correct++;
+              if (result.status === "wrong") results.wrong++;
+              if (result.status === "pending") results.pending++;
+              if (result.correctedHorizon.wasCorrected)
+                results.horizonsCorrected++;
+
+              this.log(
+                "info",
+                `[DRY-RUN] ${row.asset}: ${result.status} (${result.confidence})`,
+                {
+                  horizonCorrected: result.correctedHorizon.wasCorrected,
+                }
+              );
+            } else {
+              results.errors++;
+            }
+          } else {
+            // Full verification with database update
+            const {
+              success,
+              result,
+              error: verifyError,
+            } = await aiVerificationService.verifyAndApply(row.id);
+
+            if (success && result) {
+              results.processed++;
+              if (result.status === "correct") results.correct++;
+              if (result.status === "wrong") results.wrong++;
+              if (result.status === "pending") results.pending++;
+              if (result.correctedHorizon.wasCorrected)
+                results.horizonsCorrected++;
+
+              this.log("info", `✅ ${row.asset}: ${result.status}`, {
+                confidence: result.confidence,
+                horizonCorrected: result.correctedHorizon.wasCorrected,
+              });
+            } else {
+              results.errors++;
+              this.log("warn", `Failed to verify ${row.asset}`, {
+                error: verifyError,
+              });
+            }
+          }
+
+          // Small delay between predictions to avoid rate limiting
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        } catch (e) {
+          results.errors++;
+          this.log("error", "Error in AI verification", {
+            err: this.safeErrorMessage(e),
+            predictionId: row.id,
+          });
+        }
+      }
+
+      this.log("info", "AI reconciliation completed", {
+        requestId,
+        ...results,
+      });
+
+      return results;
+    } catch (err) {
+      this.log("error", "Unhandled error during AI reconciliation", {
+        err: this.safeErrorMessage(err),
+      });
+      return results;
     }
   }
 

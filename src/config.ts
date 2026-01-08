@@ -42,6 +42,9 @@ export const config = {
   startDate: process.env.START_DATE || "2025-01-01",
   timezone: process.env.TZ || "Europe/Istanbul",
 
+  // AI Verification (set to 'true' to use AI-driven verification instead of hardcoded logic)
+  useAIVerification: process.env.USE_AI_VERIFICATION === "true",
+
   // Logging
   logLevel: process.env.LOG_LEVEL || "info",
 

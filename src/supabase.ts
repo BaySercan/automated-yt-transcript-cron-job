@@ -1180,6 +1180,38 @@ export class SupabaseService {
       return null;
     }
   }
+
+  // ==================== AI VERIFICATION SUPPORT ====================
+
+  /**
+   * Get raw transcript by video ID
+   * Used by AI verification service to get full context
+   */
+  async getRawTranscriptByVideoId(videoId: string): Promise<string | null> {
+    try {
+      const { data, error } = await this.client
+        .from("finfluencer_predictions")
+        .select("raw_transcript")
+        .eq("video_id", videoId)
+        .single();
+
+      if (error) {
+        if (error.code === "PGRST116") {
+          // Not found
+          return null;
+        }
+        logger.warn(`Failed to fetch transcript for video ${videoId}`, {
+          error: error.message,
+        });
+        return null;
+      }
+
+      return data?.raw_transcript || null;
+    } catch (error) {
+      logger.error(`Error fetching transcript for video ${videoId}`, { error });
+      return null;
+    }
+  }
 }
 
 // Export singleton instance

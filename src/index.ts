@@ -708,9 +708,14 @@ class FinfluencerTracker {
   // Reconcile ALL horizon-passed predictions (no artificial limit)
   private async reconcileAllPredictions(): Promise<void> {
     try {
-      logger.info("🔍 Starting prediction reconciliation (ALL records)");
+      // Check environment variable to decide which verification method to use
+      const useAI = config.useAIVerification;
 
-      const BATCH_SIZE = 500;
+      logger.info(`🔍 Starting prediction reconciliation (ALL records)`, {
+        useAIVerification: useAI,
+      });
+
+      const BATCH_SIZE = useAI ? 100 : 500; // Smaller batches for AI (more expensive)
       let batchNumber = 0;
       let totalReconciled = 0;
       let hasMoreRecords = true;
@@ -718,33 +723,55 @@ class FinfluencerTracker {
       while (hasMoreRecords) {
         batchNumber++;
 
-        // Reconcile doesn't return count, so we check via a query
-        // We'll run reconcile and if it processes less than batch size, we stop
-        await combinedPredictionsService.reconcilePredictions({
-          limit: BATCH_SIZE,
-          dryRun: false,
-          retryCount: 3,
-          useAI: false,
-          requestId: `reconcile_${Date.now()}_batch${batchNumber}`,
-        });
+        if (useAI) {
+          // Use new AI-driven verification with full context
+          const result = await combinedPredictionsService.reconcileWithAI({
+            limit: BATCH_SIZE,
+            dryRun: false,
+            requestId: `ai_reconcile_${Date.now()}_batch${batchNumber}`,
+          });
 
-        // Check if there are more pending predictions to process
-        const { data: remaining } = await supabaseService
-          .getClient()
-          .from("combined_predictions")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "pending")
-          .lt("horizon_end_date", new Date().toISOString());
+          logger.info(`🤖 AI Reconciliation batch ${batchNumber} completed`, {
+            processed: result.processed,
+            correct: result.correct,
+            wrong: result.wrong,
+            pending: result.pending,
+            horizonsCorrected: result.horizonsCorrected,
+            errors: result.errors,
+          });
 
-        const remainingCount = remaining?.length ?? 0;
+          // If we processed fewer records than batch size, we're done
+          if (result.processed < BATCH_SIZE) {
+            hasMoreRecords = false;
+          }
+        } else {
+          // Use legacy hardcoded verification
+          await combinedPredictionsService.reconcilePredictions({
+            limit: BATCH_SIZE,
+            dryRun: false,
+            retryCount: 3,
+            useAI: false,
+            requestId: `reconcile_${Date.now()}_batch${batchNumber}`,
+          });
 
-        logger.info(`🔍 Reconciliation batch ${batchNumber} completed`, {
-          remainingEligible: remainingCount,
-        });
+          // Check if there are more pending predictions to process
+          const { data: remaining } = await supabaseService
+            .getClient()
+            .from("combined_predictions")
+            .select("id", { count: "exact", head: true })
+            .eq("status", "pending")
+            .lt("horizon_end_date", new Date().toISOString());
 
-        // If no more eligible records, stop
-        if (remainingCount === 0) {
-          hasMoreRecords = false;
+          const remainingCount = remaining?.length ?? 0;
+
+          logger.info(`🔍 Reconciliation batch ${batchNumber} completed`, {
+            remainingEligible: remainingCount,
+          });
+
+          // If no more eligible records, stop
+          if (remainingCount === 0) {
+            hasMoreRecords = false;
+          }
         }
 
         // Safety: limit total batches to prevent infinite loops
@@ -755,12 +782,15 @@ class FinfluencerTracker {
 
         // Small delay between batches
         if (hasMoreRecords) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) =>
+            setTimeout(resolve, useAI ? 1000 : 500)
+          );
         }
       }
 
       logger.info("✅ Prediction reconciliation completed (ALL batches)", {
         totalBatches: batchNumber,
+        useAIVerification: useAI,
       });
     } catch (err) {
       logger.warn("Failed to reconcile combined predictions", { error: err });
