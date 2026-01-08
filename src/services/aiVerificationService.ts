@@ -485,6 +485,11 @@ If the horizon value is INVALID, provide a corrected value based on:
 
       const parsed = JSON.parse(jsonMatch[0]);
 
+      // Normalize status to lowercase
+      if (parsed.status) {
+        parsed.status = parsed.status.toLowerCase();
+      }
+
       // Validate required fields
       if (
         !parsed.status ||
