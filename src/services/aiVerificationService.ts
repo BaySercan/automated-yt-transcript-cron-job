@@ -707,6 +707,23 @@ If the horizon value is INVALID, provide a corrected value based on:
         });
       }
 
+      // Save entry price if missing (use first price from history as fallback)
+      if (priceHistory.length > 0) {
+        const { data: current } = await supabaseService.supabase
+          .from("combined_predictions")
+          .select("asset_entry_price")
+          .eq("id", predictionId)
+          .single();
+
+        if (!current?.asset_entry_price) {
+          updateData.asset_entry_price = String(priceHistory[0].price);
+          logger.info(`💰 Saved missing entry price for ${predictionId}`, {
+            entryPrice: priceHistory[0].price,
+            entryDate: priceHistory[0].date,
+          });
+        }
+      }
+
       const { error } = await supabaseService.supabase
         .from("combined_predictions")
         .update(updateData)

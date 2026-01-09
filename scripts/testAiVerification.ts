@@ -177,6 +177,7 @@ async function testBatch(
   const { data: predictions, error } = await supabaseService.supabase
     .from("combined_predictions")
     .select("id, asset, sentiment, horizon_value, status")
+    .in("status", ["correct", "wrong"])
     .order("created_at", { ascending: true })
     .range(offset, offset + limit - 1);
 
@@ -185,7 +186,7 @@ async function testBatch(
     return;
   }
 
-  console.log(`Found ${predictions.length} pending predictions\n`);
+  console.log(`Found ${predictions.length} predictions\n`);
 
   const results = {
     total: predictions.length,
